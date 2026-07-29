@@ -1,4 +1,4 @@
-# Master Plan: P2P Speedtest (WebRTC + Cloudflare Workers)
+# Main Plan: P2P Speedtest (WebRTC + Cloudflare Workers)
 
 > **Status**: APPROVED
 > **Created**: 2026-07-29
@@ -592,7 +592,7 @@ out of MVP scope and can be picked up in any order afterward.
 ### Required Updates
 1. Resolve the room identity encoding design so every join method can deterministically and safely resolve to one room without impossible bit-packing or undocumented storage.
 2. Reconcile the 2-peer cap with stale peer replacement by specifying the Durable Object socket lifecycle and 3rd-join rules.
-3. Add repo-specific Worker integration constraints to the master plan so Phase 1 implementation plans include Durable Object config, routing, and migration work.
+3. Add repo-specific Worker integration constraints to the main plan so Phase 1 implementation plans include Durable Object config, routing, and migration work.
 
 ## Re-Review Feedback (Codex, 2026-07-29)
 
@@ -605,7 +605,7 @@ out of MVP scope and can be picked up in any order afterward.
 - **P2**: Resolved. The React Router + Cloudflare Worker integration path is now explicit: API dispatch happens before the React Router handler, `SignalingRoom` must be exported, and `wrangler.jsonc` must add the Durable Object binding and migration.
 
 ### Follow-Up For Claude (Phase 1 Plan)
-1. Specify the concrete rate-limiting mechanism for room lookup/join attempts, since the master plan relies on throttling to make the 42-bit room-token choice acceptable.
+1. Specify the concrete rate-limiting mechanism for room lookup/join attempts, since the main plan relies on throttling to make the 42-bit room-token choice acceptable.
 
 ## Amendment (2026-07-29): Page/route definitions
 
@@ -787,12 +787,12 @@ this amendment and the updated phase-plan sections that reference
 - **Status: CHANGES REQUESTED**
 
 ### Findings
-- **[P1] `data.via` is required for `FAILED`/`CANCELED` records even though the amendment says those records may happen before ICE classification exists.** The schema requires `data.via` for every result, and the master success criteria require failed/canceled tests to validate against that schema. But the amendment also says a failed/canceled test may never reach a second peer or ever measure anything. In those cases there may be no selected ICE candidate pair and no meaningful `DIRECT`/`RELAY` value. This blocks implementation because the DO cannot produce a truthful schema-valid record for early failure/cancel paths. Either add an `UNKNOWN`/`UNDETERMINED` enum value, make `via` conditionally required only after pairing/ICE classification exists, or scope persisted failed/canceled records to only failures after `via` is known.
-- **[P1] Required peer `ip`/`protocol` fields are sourced from a client-side geo lookup that can fail.** The amendment says each peer reports `{ip, protocol, geo}` after calling the geo proxy, while the schema requires `peers[].ip` and `peers[].protocol` whenever a peer is included. Phase 2 says geo lookup failure should not block the test, but the master does not define a server-observed fallback for `ip`/`protocol` in `data.peers`. Without that fallback, any failure of `https://ip.aries0d0f.me/?q=geo` leaves the DO unable to include that peer in a schema-valid result. Define that the DO stores authoritative `ip`/`protocol` from `CF-Connecting-IP` at WebSocket accept and uses client geo lookup only to populate the optional `geo` fields.
-- **[P2] The hash/signing contract is internally inconsistent around fallback records.** Decision 7 says records use the DO-finalized `data` plus DO-computed `metadata.hash`, never hashed client-side. Phase 4 now proposes a locally synthesized failed record with a placeholder zero hash if `result-ready` never arrives. That would still match the schema pattern but violates the master contract and undermines import-time integrity checks. Decide whether non-DO fallback records are out-of-scope for persistence, get a real client-computed integrity hash with an explicit `source`/attestation field, or require all persisted records to come from DO finalization only.
+- **[P1] `data.via` is required for `FAILED`/`CANCELED` records even though the amendment says those records may happen before ICE classification exists.** The schema requires `data.via` for every result, and the main success criteria require failed/canceled tests to validate against that schema. But the amendment also says a failed/canceled test may never reach a second peer or ever measure anything. In those cases there may be no selected ICE candidate pair and no meaningful `DIRECT`/`RELAY` value. This blocks implementation because the DO cannot produce a truthful schema-valid record for early failure/cancel paths. Either add an `UNKNOWN`/`UNDETERMINED` enum value, make `via` conditionally required only after pairing/ICE classification exists, or scope persisted failed/canceled records to only failures after `via` is known.
+- **[P1] Required peer `ip`/`protocol` fields are sourced from a client-side geo lookup that can fail.** The amendment says each peer reports `{ip, protocol, geo}` after calling the geo proxy, while the schema requires `peers[].ip` and `peers[].protocol` whenever a peer is included. Phase 2 says geo lookup failure should not block the test, but the main does not define a server-observed fallback for `ip`/`protocol` in `data.peers`. Without that fallback, any failure of `https://ip.aries0d0f.me/?q=geo` leaves the DO unable to include that peer in a schema-valid result. Define that the DO stores authoritative `ip`/`protocol` from `CF-Connecting-IP` at WebSocket accept and uses client geo lookup only to populate the optional `geo` fields.
+- **[P2] The hash/signing contract is internally inconsistent around fallback records.** Decision 7 says records use the DO-finalized `data` plus DO-computed `metadata.hash`, never hashed client-side. Phase 4 now proposes a locally synthesized failed record with a placeholder zero hash if `result-ready` never arrives. That would still match the schema pattern but violates the main contract and undermines import-time integrity checks. Decide whether non-DO fallback records are out-of-scope for persistence, get a real client-computed integrity hash with an explicit `source`/attestation field, or require all persisted records to come from DO finalization only.
 
 ### Required Updates
-1. Fix the schema/master contract for `data.via` on pre-ICE `FAILED`/`CANCELED` records.
+1. Fix the schema/main contract for `data.via` on pre-ICE `FAILED`/`CANCELED` records.
 2. Make server-observed `ip`/`protocol` the fallback or authority for `data.peers[]`, with client geo lookup supplying optional geo details only.
 3. Remove or redesign local placeholder-hash fallback records so persisted records do not look DO-finalized when they are not.
 
