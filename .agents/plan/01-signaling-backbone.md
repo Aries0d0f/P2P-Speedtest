@@ -561,44 +561,8 @@ hand — Phase 2 reuses this exact connection and envelope for SDP/ICE.
 ## Review Feedback (Codex, 2026-07-29)
 
 ### Review State
-- **Status: CHANGES REQUESTED**
-
-### Findings
-- **[P1] Normal completion has no lifecycle trigger.** `run-ended:
-  complete` is DO-to-peer only, while the fixed inbound message set contains
-  no lifecycle-only signal that can make the DO enter that state.
-- **[P2] The two peers are not guaranteed the same `test-config`.** Issuing
-  current parameters independently on each socket accept can produce
-  different stage limits if configuration changes while slot 0 is waiting.
-
-### Required Updates
-1. Define the data-free client/DO completion transition, including duplicate
-   handling and an end-to-end normal-completion test.
-2. Snapshot one room/run test configuration and issue that same value to both
-   accepted peers, including a pre-run replacement.
-
-## Re-Review Feedback (Codex, 2026-07-29)
-
-### Review State
 - **Status: APPROVED**
 
 ### Assessment
-- **P1**: Resolved. `run-finished` is a payload-free, run-scoped,
-  attachment-authenticated acknowledgement sent only after local
-  finalization. Per-slot deduplication, the two-ack
-  `run-ended: complete` transition, the one-ack grace deadline, durable
-  state, and end-to-end exit checks are explicit.
-- **P2**: Resolved. `testConfig` is snapshotted once at room claim, stored
-  durably, and replayed unchanged to both original peers and any pre-run
-  replacement.
-
-## Re-Review Feedback (Codex, 2026-07-29, Verification Pass)
-
-### Review State
-- **Status: APPROVED**
-
-### Assessment
-- **P1**: Resolved. Normal lifecycle completion is reachable, run-scoped,
-  payload-free, duplicate-safe, and covered through timeout.
-- **P2**: Resolved. One durable room snapshot supplies every accepted peer.
-- No new Phase 1 finding.
+- All review findings are resolved. The lifecycle handshake and room-stable
+  test configuration are explicit, durable, and verifiable.

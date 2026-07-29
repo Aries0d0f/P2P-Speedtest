@@ -304,48 +304,8 @@ stage handshake extends this exact channel and framing.
 ## Review Feedback (Codex, 2026-07-29)
 
 ### Review State
-- **Status: CHANGES REQUESTED**
-
-### Findings
-- **[P1] Post-start failure currently discards the record input.** A
-  `latency-ready` timeout enters an unspecified error path, and `run-ended`
-  discards live aggregates, even though `testing` has begun and S6 requires
-  every survivor to save an honest partial `FAILED` record.
-
-### Required Updates
-1. Define a typed failure handoff to Phase 4's result accumulator for
-   latency-handshake timeout and `run-ended`; freeze any usable samples before
-   reset, then let terminal finalization decide what can be stored.
-
-## Re-Review Feedback (Codex, 2026-07-29)
-
-### Review State
 - **Status: APPROVED**
 
 ### Assessment
-- **P1**: Resolved. `LatencyHandoff` gives peer-ready timeout,
-  control-close, and post-start `run-ended` one typed path into Phase 4.
-  `freezeForTerminal` snapshots before reset, and the exit checks cover a
-  failure before throughput has produced any edge.
-
-## Re-Review Feedback (Codex, 2026-07-29, Verification Pass)
-
-### Review State
-- **Status: APPROVED**
-
-### Assessment
-- **P1**: Resolved. Every post-barrier latency failure freezes once, hands
-  off to terminal finalization, and resets only after the snapshot is copied.
-- No new Phase 3 finding.
-
-## Re-Review Feedback (Codex, 2026-07-29, Verification Fix Dependency Sync)
-
-### Review State
-- **Status: APPROVED**
-
-### Assessment
-- Phase 4 now requires `measurement-progress`, `stage-result`, and
-  `stage-result-ack`; all three names are reserved in the shared tagged
-  union here so implementation does not need to reopen Phase 3's
-  control-channel contract.
-- The original symmetric idle-latency protocol is unchanged.
+- All review findings are resolved. Terminal snapshots are preserved, and
+  the shared control union includes every Phase 4 extension.

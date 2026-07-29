@@ -547,75 +547,8 @@ control channel.
 ## Review Feedback (Codex, 2026-07-29)
 
 ### Review State
-- **Status: CHANGES REQUESTED**
-
-### Findings
-- **[P1] Immediate `run-ended` teardown conflicts with partial-result
-  persistence.** Closing the peer connection and channels first can destroy
-  the measurements and result exchange that S6 and Phases 4–5 require after
-  a mid-test disconnect or expiry.
-- **[P1] Testing can start before the record-critical profile is known.**
-  Phase 3 gates on `channel-ready`, but this phase does not guarantee that
-  both initial profiles—especially slot 0's required timestamp—were sent and
-  received before that barrier.
-- **[P2] `timestamp` has two meanings.** This phase creates it during pairing,
-  while the authoritative schema describes it as the completion timestamp.
-
-### Required Updates
-1. Define an ordered terminal handoff: freeze/snapshot post-measurement state,
-   finalize and save what is available, then tear down transport; keep it
-   idempotent for simultaneous failure signals.
-2. Make initial profile receipt a prerequisite of the testing barrier, while
-   keeping later geo enrichment non-blocking.
-3. Align `timestamp` production with the schema, or explicitly change the
-   authoritative field definition before implementation.
-
-## Re-Review Feedback (Codex, 2026-07-29)
-
-### Review State
 - **Status: APPROVED**
 
 ### Assessment
-- **P1 (terminal ordering)**: Resolved. Pre-measurement teardown is separate
-  from the post-start `stopProducing → finalizeTerminal → teardown` path,
-  and concurrent terminal signals join one run-scoped promise.
-- **P1 (profile gate)**: Resolved. `channel-ready` now requires the local
-  initial profile to be sent and the remote initial profile to be validated;
-  geo/address enrichment remains non-blocking.
-- **P2**: Resolved. `timestamp` is consistently defined as slot 0's
-  canonical run timestamp, and the authoritative schema description was
-  updated to match.
-
-## Re-Review Feedback (Codex, 2026-07-29, Verification Pass)
-
-### Review State
-- **Status: CHANGES REQUESTED**
-
-### Findings
-- **[P1] A local pre-measurement failure does not terminate the server
-  run.** ICE failure or initial-profile timeout can tear down the peer
-  connection and show a terminal page while the signaling socket and DO run
-  remain live, leaving the other peer waiting and the room non-terminal.
-
-### Assessment
-- The prior terminal-ordering, profile-barrier, and timestamp findings are
-  resolved.
-
-### Required Updates
-1. Define the pre-measurement failure action that ends the DO run—such as
-   closing the signaling socket with a mapped reason—and verify the other
-   peer becomes terminal and a replacement cannot join.
-
-## Re-Review Feedback (Codex, 2026-07-29, Verification Fix)
-
-### Review State
-- **Status: APPROVED**
-
-### Assessment
-- **P1**: Resolved. Every local post-`run-started`, pre-measurement failure
-  now enters one idempotent abort, closes the signaling socket with private
-  code `4401` before local teardown, and relies on Phase 1's established
-  post-start socket-loss path to terminate the DO run.
-- Exit checks cover both ICE failure and initial-profile timeout, require
-  the surviving peer to receive a terminal event, and verify that a
-  replacement cannot join the ended run.
+- All review findings are resolved. Profile readiness, timestamp ownership,
+  pre-measurement abort, and post-start finalization ordering are complete.
