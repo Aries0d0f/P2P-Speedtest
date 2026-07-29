@@ -16,6 +16,35 @@ export type ConnectionType = "DIRECT" | "RELAY" | "UNKNOWN";
 
 export type ChannelLabel = "control" | "bulk";
 
+/**
+ * Bulk transfer runs over this many parallel data channels rather than one
+ * (04-throughput-measurement.md revision, performance finding). All of
+ * them still multiplex over the single SCTP association a `RTCPeerConnection`
+ * gets — this doesn't buy independent congestion windows the way parallel
+ * TCP connections do — but it keeps more data "ready to send" across
+ * independent per-channel backpressure loops, which measurably reduces
+ * idle time between JS callbacks versus a single channel's send loop
+ * stalling on one `bufferedamountlow` round trip at a time.
+ */
+export const BULK_CHANNEL_COUNT = 4;
+
+const BULK_LABEL_PATTERN = /^bulk-(\d+)$/;
+
+function bulkChannelLabel(index: number): string {
+  return `bulk-${index}`;
+}
+
+/** Returns the channel's bulk index, or `null` if it's not a bulk channel
+ * (i.e. it's the control channel). Exported so callers (room.tsx) can
+ * recover the same index from `RTCDataChannel.label` without duplicating
+ * the parsing rule. */
+export function bulkChannelIndex(label: string): number | null {
+  const match = BULK_LABEL_PATTERN.exec(label);
+  if (!match) return null;
+  const index = Number(match[1]);
+  return index >= 0 && index < BULK_CHANNEL_COUNT ? index : null;
+}
+
 export interface WebrtcCallbacks {
   onConnectionStateChange?: (state: RTCPeerConnectionState) => void;
   onConnectionTypeChange?: (type: ConnectionType) => void;
@@ -123,7 +152,9 @@ export class WebrtcConnection {
   private pendingCandidates: RTCIceCandidateInit[] = [];
 
   private controlChannel: RTCDataChannel | null = null;
-  private bulkChannel: RTCDataChannel | null = null;
+  private readonly bulkChannels: (RTCDataChannel | null)[] = new Array(BULK_CHANNEL_COUNT).fill(
+    null,
+  );
 
   private producing = true;
   private torndown = false;
@@ -189,13 +220,15 @@ export class WebrtcConnection {
     };
 
     if (this.slot === 0) {
-      // Both channels are created here, before the first (and only) offer:
+      // Every channel is created here, before the first (and only) offer:
       // a channel added post-connect triggers renegotiation, and there is
       // no renegotiation flow in this design.
       this.wireChannel(this.pc.createDataChannel("control", { ordered: true }));
-      this.wireChannel(
-        this.pc.createDataChannel("bulk", { ordered: false, maxRetransmits: 0 }),
-      );
+      for (let i = 0; i < BULK_CHANNEL_COUNT; i++) {
+        this.wireChannel(
+          this.pc.createDataChannel(bulkChannelLabel(i), { ordered: false, maxRetransmits: 0 }),
+        );
+      }
       void this.startAsOfferer();
     }
   }
@@ -204,8 +237,13 @@ export class WebrtcConnection {
     return this.controlChannel;
   }
 
-  getBulkChannel(): RTCDataChannel | null {
-    return this.bulkChannel;
+  /** All `BULK_CHANNEL_COUNT` bulk channels, in index order. Only
+   * meaningful once every one of them has opened — callers gate on that
+   * themselves (room.tsx waits for `BULK_CHANNEL_COUNT` `onChannelOpen`
+   * calls before starting stages), so this never silently returns a
+   * partial, misordered set to a caller that assumed otherwise. */
+  getBulkChannels(): RTCDataChannel[] {
+    return this.bulkChannels.filter((c): c is RTCDataChannel => c !== null);
   }
 
   getConnectionType(): ConnectionType {
@@ -282,10 +320,12 @@ export class WebrtcConnection {
     } catch {
       // already closed
     }
-    try {
-      this.bulkChannel?.close();
-    } catch {
-      // already closed
+    for (const channel of this.bulkChannels) {
+      try {
+        channel?.close();
+      } catch {
+        // already closed
+      }
     }
     try {
       this.pc.close();
@@ -379,10 +419,11 @@ export class WebrtcConnection {
   }
 
   private wireChannel(channel: RTCDataChannel): void {
-    const label = channel.label === "bulk" ? "bulk" : "control";
-    if (label === "bulk") {
+    const index = bulkChannelIndex(channel.label);
+    const label: ChannelLabel = index === null ? "control" : "bulk";
+    if (index !== null) {
       channel.binaryType = "arraybuffer";
-      this.bulkChannel = channel;
+      this.bulkChannels[index] = channel;
     } else {
       this.controlChannel = channel;
     }
