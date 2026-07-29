@@ -371,42 +371,7 @@ work done.
 ### Review State
 - **Status: APPROVED**
 
-### Findings
-- No phase-local findings. The page, portability, robustness, and sign-off
-  scope is complete and explicitly depends on Phase 4's record contract.
-
-### Required Updates
-1. None in this file. Re-run the robustness matrix after the upstream
-   terminal and loss contracts are corrected.
-
-## Re-Review Feedback (Codex, 2026-07-29, Verification Pass)
-
-### Review State
-- **Status: CHANGES REQUESTED**
-
-### Findings
-- **[P1] The robustness matrix promises data the survivor does not have.**
-  On a peer close during duplex, Phase 4 has not yet exchanged the closed
-  peer's directional measurement, so “directional pair retained” is
-  currently impossible.
-
 ### Assessment
-- The original results-page, portability, and sign-off scope remains
-  complete; this new finding is a cross-phase persistence expectation.
-
-### Required Updates
-1. Synchronize this matrix with Phase 4: either require stage-boundary
-   banking of both directional edges or expect only the survivor's known
-   edge.
-
-## Re-Review Feedback (Codex, 2026-07-29, Verification Fix)
-
-### Review State
-- **Status: APPROVED**
-
-### Assessment
-- **P1**: Resolved. The duplex-close row now depends on Phase 4's explicit
-  rule that each directional result is validated, banked on both peers, and
-  acknowledged before duplex starts.
-- Phase 5 also follows Phase 4's transactional IndexedDB history contract,
-  including async SSR-safe reads and a list-page two-tab retention check.
+- All review findings are resolved. Results consumption, IndexedDB
+  portability, the robustness matrix, and final evidence requirements align
+  with Phase 4.
