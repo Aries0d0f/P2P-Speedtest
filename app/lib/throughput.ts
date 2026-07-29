@@ -1,14 +1,17 @@
 /**
- * Bulk transfer over the unordered, non-retransmitting `bulk` channel (4.1,
- * S5). One channel carries every stage in both directions — the frame
- * header says which stage a chunk belongs to, so a second channel would add
- * negotiation surface for nothing (Phase 2 already creates it with
+ * Bulk transfer over the unordered, non-retransmitting `bulk-*` channels
+ * (4.1, S5; multi-channel revision — see 04-throughput-measurement.md's
+ * "Revision: parallel bulk channels"). `BULK_CHANNEL_COUNT` (webrtc.ts)
+ * parallel channels carry every stage in both directions — the frame
+ * header says which stage a chunk belongs to, so a receiver never needs to
+ * know which physical channel delivered it, only that all of them share
+ * one `runId`/`stageId`/measured-sequence space (each created with
  * `{ ordered: false, maxRetransmits: 0 }`).
  *
  * `control-channel.ts` (4.2) owns the stage-sequencing FSM and everything
  * on the reliable control channel, including `measurement-progress`; this
- * module only knows about the binary bulk channel itself — framing, the
- * send loop's backpressure, and the receiver's counters.
+ * module only knows about the binary bulk channels themselves — framing,
+ * the send loop's per-channel backpressure, and the receiver's counters.
  */
 
 import { bytesToUuid, uuidToBytes } from "./uuid-bytes";
@@ -124,11 +127,14 @@ export const RAMP_UP_MS = 1500;
 // a few MiB, and scaled up further for a large chunk size. Client-side
 // only — the numbers that actually shape a test (duration, byte cap, chunk
 // size) come from server-issued `test-config`, never this.
-const BUFFERED_LOW_THRESHOLD_CHUNKS = 64;
-const BUFFERED_LOW_THRESHOLD_MIN_BYTES = 16 * 1024 * 1024; // 16 MiB — cheap for a run lasting seconds
+const BUFFERED_LOW_THRESHOLD_CHUNKS = 32;
+const BUFFERED_LOW_THRESHOLD_MIN_BYTES = 4 * 1024 * 1024; // 4 MiB — cheap for a run lasting seconds
 
 export interface BulkSenderOptions {
-  channel: BulkChannel;
+  /** One or more channels to fan the measured stream across (04-throughput
+   * revision: parallel bulk channels). A single-entry array is the
+   * one-channel case — there's nothing special about it. */
+  channels: BulkChannel[];
   runId: string;
   stageId: StageId;
   chunkBytes: number;
@@ -144,19 +150,24 @@ export interface BulkSenderOptions {
 type SenderPhase = "ramp-up" | "measured" | "done";
 
 /** Event-driven send loop against `bufferedAmount`/`bufferedamountlow`
- * (4.1): sends until the channel's buffer crosses its low-water threshold,
- * then waits for the browser to tell it there's room again, rather than
- * ever queuing unbounded data client-side. */
+ * (4.1), fanned out across every channel in `channels`: each one gets its
+ * own backpressure loop, but they all draw the next seq/byte from one
+ * shared counter, so a channel that drains faster naturally pulls more of
+ * the stream — no explicit round-robin bookkeeping needed. Sends until a
+ * channel's buffer crosses its low-water threshold, then waits for the
+ * browser to tell that channel there's room again, rather than ever
+ * queuing unbounded data client-side. */
 export class BulkSender {
   private readonly opts: Required<Omit<BulkSenderOptions, "onComplete">> &
     Pick<BulkSenderOptions, "onComplete">;
   // One preallocated measured/ramp-up frame, mutated (seq + kind byte only)
-  // and resent on every call rather than allocated fresh each time.
-  // `RTCDataChannel.send(ArrayBuffer)` copies its contents synchronously
-  // before returning (structured-clone semantics, no transfer list), so
-  // reusing this buffer immediately after `send()` returns is safe — and
-  // it's what turns "one allocation + one memcpy per chunk" into zero,
-  // which matters once you're sending thousands of chunks/sec.
+  // and resent on every call rather than allocated fresh each time — safe
+  // to share across every channel because `RTCDataChannel.send(ArrayBuffer)`
+  // copies its contents synchronously before returning (structured-clone
+  // semantics, no transfer list) and JS is single-threaded, so no two
+  // sends can ever be "in flight" over this buffer at once. Turns "one
+  // allocation + one memcpy per chunk" into zero, which matters once
+  // you're sending thousands of chunks/sec across several channels.
   private readonly frameBuffer: ArrayBuffer;
   private readonly frameBytes: Uint8Array;
   private readonly frameView: DataView;
@@ -169,9 +180,12 @@ export class BulkSender {
   private started = false;
   private stopped = false;
 
-  private readonly onBufferedLow = () => this.pump();
+  private readonly onBufferedLowByChannel: Array<() => void>;
 
   constructor(opts: BulkSenderOptions) {
+    if (opts.channels.length === 0) {
+      throw new RangeError("BulkSender: at least one channel is required");
+    }
     this.opts = { rampUpMs: RAMP_UP_MS, onComplete: opts.onComplete, ...opts };
 
     this.frameBuffer = new ArrayBuffer(BULK_FRAME_HEADER_BYTES + this.opts.chunkBytes);
@@ -183,6 +197,8 @@ export class BulkSender {
     this.frameBytes[16] = this.opts.stageId;
     // The payload region (byte 22 onward) stays zero-filled; its content
     // is never inspected by either side, only its length.
+
+    this.onBufferedLowByChannel = this.opts.channels.map(() => () => this.pump());
   }
 
   get sentMeasuredChunks(): number {
@@ -194,11 +210,14 @@ export class BulkSender {
     this.started = true;
     const now = Date.now();
     this.rampUpEndsAt = now + this.opts.rampUpMs;
-    this.opts.channel.bufferedAmountLowThreshold = Math.max(
+    const threshold = Math.max(
       this.opts.chunkBytes * BUFFERED_LOW_THRESHOLD_CHUNKS,
       BUFFERED_LOW_THRESHOLD_MIN_BYTES,
     );
-    this.opts.channel.addEventListener("bufferedamountlow", this.onBufferedLow);
+    this.opts.channels.forEach((channel, i) => {
+      channel.bufferedAmountLowThreshold = threshold;
+      channel.addEventListener("bufferedamountlow", this.onBufferedLowByChannel[i]);
+    });
     this.pump();
   }
 
@@ -208,29 +227,37 @@ export class BulkSender {
   stop(): void {
     if (this.stopped) return;
     this.stopped = true;
-    this.opts.channel.removeEventListener("bufferedamountlow", this.onBufferedLow);
+    this.opts.channels.forEach((channel, i) =>
+      channel.removeEventListener("bufferedamountlow", this.onBufferedLowByChannel[i]),
+    );
   }
 
+  /** One pass over every channel, filling each until it hits its own
+   * threshold. Re-entered whenever any one channel's `bufferedamountlow`
+   * fires; a channel still above its threshold when visited is a cheap
+   * no-op (the inner `while` never executes). */
   private pump(): void {
     if (this.stopped || this.phase === "done") return;
-    while (this.opts.channel.bufferedAmount < this.opts.channel.bufferedAmountLowThreshold) {
-      if (!this.sendNext()) return;
+    for (const channel of this.opts.channels) {
+      while (channel.bufferedAmount < channel.bufferedAmountLowThreshold) {
+        if (!this.sendNext(channel)) return;
+      }
     }
   }
 
-  /** Sends exactly one frame and returns whether the loop should keep
-   * going. Ramp-up falls through into measured immediately once its timer
-   * elapses, in the same backpressure-gated pass. */
-  private sendNext(): boolean {
+  /** Sends exactly one frame on `channel` and returns whether the loop
+   * should keep going. Ramp-up falls through into measured immediately
+   * once its timer elapses, in the same backpressure-gated pass. */
+  private sendNext(channel: BulkChannel): boolean {
     const now = Date.now();
 
     if (this.phase === "ramp-up") {
       if (now >= this.rampUpEndsAt) {
         this.phase = "measured";
         this.measuredDeadlineAt = now + this.opts.maxDurationMs;
-        return this.sendNext();
+        return this.sendNext(channel);
       }
-      this.sendFrame(0, "ramp-up");
+      this.sendFrame(channel, 0, "ramp-up");
       return true;
     }
 
@@ -240,37 +267,39 @@ export class BulkSender {
       return false;
     }
     const seq = this.nextSeq++;
-    this.sendFrame(seq, "measured");
+    this.sendFrame(channel, seq, "measured");
     this.bytesSent += this.opts.chunkBytes;
     return true;
   }
 
   private finish(): void {
     this.phase = "done";
-    this.sendRaw(
-      encodeBulkFrame({
-        runId: this.opts.runId,
-        stageId: this.opts.stageId,
-        seq: this.nextSeq,
-        kind: "end",
-        data: new Uint8Array(0),
-      }),
-    );
+    const endFrame = encodeBulkFrame({
+      runId: this.opts.runId,
+      stageId: this.opts.stageId,
+      seq: this.nextSeq,
+      kind: "end",
+      data: new Uint8Array(0),
+    });
+    // The marker is itself unreliable, so it goes out on every channel —
+    // redundancy across all of them meaningfully raises the odds at least
+    // one arrives, for the cost of a few 22-byte frames.
+    for (const channel of this.opts.channels) this.sendRaw(channel, endFrame);
     this.stop();
     this.opts.onComplete?.(this.nextSeq);
   }
 
   /** Writes `seq`/kind into the reused frame buffer and sends it — the hot
    * path for every ramp-up/measured chunk. */
-  private sendFrame(seq: number, kind: BulkFrameKind): void {
+  private sendFrame(channel: BulkChannel, seq: number, kind: BulkFrameKind): void {
     this.frameView.setUint32(17, seq, false);
     this.frameBytes[21] = KIND_CODES[kind];
-    this.sendRaw(this.frameBuffer);
+    this.sendRaw(channel, this.frameBuffer);
   }
 
-  private sendRaw(buffer: ArrayBuffer): void {
+  private sendRaw(channel: BulkChannel, buffer: ArrayBuffer): void {
     try {
-      this.opts.channel.send(buffer);
+      channel.send(buffer);
     } catch {
       // Channel already closed — the surrounding room/control-channel
       // handles a closed bulk channel as its own failure trigger.
