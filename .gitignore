@@ -7,6 +7,9 @@
 /.react-router/
 /build/
 
+# Generated at build/test/dev time from schemas/*.yaml (scripts/build-schema.mjs)
+/app/lib/generated/
+
 # Cloudflare
 .mf
 .wrangler
