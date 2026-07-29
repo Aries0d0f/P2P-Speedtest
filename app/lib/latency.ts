@@ -15,7 +15,7 @@
 // would have to be widened by the phase it was meant to serve; anything not
 // in this list is rejected outright by `decodeLatencyMessage` rather than
 // silently accepted.
-const CONTROL_MESSAGE_TYPES = [
+export const CONTROL_MESSAGE_TYPES = [
   "channel-ready",
   "ping",
   "pong",
