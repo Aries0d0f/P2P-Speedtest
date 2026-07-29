@@ -44,7 +44,12 @@ import { slugToToken, tokenToEmojiKey, tokenToSlug } from "~/lib/room-token";
 import { edgeKey, stageName, type StageId } from "~/lib/stage";
 import { parseBulkFrame } from "~/lib/throughput";
 import type { ChannelLabel, ConnectionType } from "~/lib/webrtc";
-import { WebrtcConnection, isForceRelayRequested } from "~/lib/webrtc";
+import {
+  BULK_CHANNEL_COUNT,
+  bulkChannelIndex,
+  WebrtcConnection,
+  isForceRelayRequested,
+} from "~/lib/webrtc";
 
 import type { Route } from "./+types/room";
 
@@ -285,7 +290,9 @@ export default function Room({ params }: Route.ComponentProps) {
 
   // Phase 4 (S5 gate, 4.4)
   const controlChannelRef = useRef<RTCDataChannel | null>(null);
-  const bulkChannelRef = useRef<RTCDataChannel | null>(null);
+  // Indexed by the channel's parsed "bulk-N" label (04-throughput revision:
+  // parallel bulk channels) — a hole means that channel hasn't opened yet.
+  const bulkChannelsRef = useRef<(RTCDataChannel | null)[]>(new Array(BULK_CHANNEL_COUNT).fill(null));
   const testConfigRef = useRef<TestConfigPayload | null>(null);
   const latencyHandoffFiredRef = useRef(false);
   const latencyReadyRef = useRef(false);
@@ -439,8 +446,9 @@ export default function Room({ params }: Route.ComponentProps) {
 
     function maybeStartStages() {
       if (stageOrchestratorRef.current) return;
+      const bulkChannels = bulkChannelsRef.current;
       if (
-        !bulkChannelRef.current ||
+        bulkChannels.some((c) => c === null) ||
         !testConfigRef.current ||
         !latencyReadyRef.current ||
         !selfRef.current ||
@@ -453,7 +461,7 @@ export default function Room({ params }: Route.ComponentProps) {
         selfSlot: selfRef.current.slot,
         testConfig: testConfigRef.current,
         send: sendControlRaw,
-        bulkChannel: bulkChannelRef.current,
+        bulkChannels: bulkChannels as RTCDataChannel[],
         callbacks: {
           onStageStarted: (stage) => setCurrentStage(stage),
           onProgress: (snapshot) =>
@@ -494,7 +502,8 @@ export default function Room({ params }: Route.ComponentProps) {
 
     async function handleChannelOpen(label: ChannelLabel, channel: RTCDataChannel) {
       if (label === "bulk") {
-        bulkChannelRef.current = channel;
+        const index = bulkChannelIndex(channel.label);
+        if (index !== null) bulkChannelsRef.current[index] = channel;
         maybeStartStages();
         return;
       }
