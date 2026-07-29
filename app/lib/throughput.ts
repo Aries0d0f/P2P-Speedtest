@@ -115,12 +115,17 @@ export interface BulkChannel {
  * budget for it without duplicating the constant. */
 export const RAMP_UP_MS = 500;
 
-// A multiple of a typical chunk size so the send loop keeps a healthy
-// amount of data queued between `bufferedamountlow` events rather than
-// firing one per chunk. Client-side only — the numbers that actually shape
-// a test (duration, byte cap, chunk size) come from server-issued
-// `test-config`, never this.
-const BUFFERED_LOW_THRESHOLD_CHUNKS = 4;
+// Each `bufferedamountlow` round trip carries real fixed overhead (event
+// dispatch, SCTP bookkeeping) independent of link speed. A small threshold
+// means paying that overhead every few hundred KB, which throttles a fast
+// (e.g. direct LAN) link far below what the wire can actually do — the
+// bottleneck becomes the JS/event-loop round trip, not the network. Keep
+// enough queued that the browser rarely runs dry between events: at least
+// a few MiB, and scaled up further for a large chunk size. Client-side
+// only — the numbers that actually shape a test (duration, byte cap, chunk
+// size) come from server-issued `test-config`, never this.
+const BUFFERED_LOW_THRESHOLD_CHUNKS = 32;
+const BUFFERED_LOW_THRESHOLD_MIN_BYTES = 4 * 1024 * 1024; // 4 MiB
 
 export interface BulkSenderOptions {
   channel: BulkChannel;
@@ -171,8 +176,10 @@ export class BulkSender {
     this.started = true;
     const now = Date.now();
     this.rampUpEndsAt = now + this.opts.rampUpMs;
-    this.opts.channel.bufferedAmountLowThreshold =
-      this.opts.chunkBytes * BUFFERED_LOW_THRESHOLD_CHUNKS;
+    this.opts.channel.bufferedAmountLowThreshold = Math.max(
+      this.opts.chunkBytes * BUFFERED_LOW_THRESHOLD_CHUNKS,
+      BUFFERED_LOW_THRESHOLD_MIN_BYTES,
+    );
     this.opts.channel.addEventListener("bufferedamountlow", this.onBufferedLow);
     this.pump();
   }

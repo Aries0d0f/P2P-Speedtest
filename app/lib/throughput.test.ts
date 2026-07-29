@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  BULK_FRAME_HEADER_BYTES,
   BulkReceiver,
   BulkSender,
   encodeBulkFrame,
@@ -132,29 +133,38 @@ describe("BulkSender", () => {
     });
 
     sender.start();
-    const framesDuringRampUp = channel.sent.map((b) => parseBulkFrame(b)!);
-    expect(framesDuringRampUp.every((f) => f.kind === "ramp-up")).toBe(true);
-    expect(framesDuringRampUp.every((f) => f.seq === 0)).toBe(true);
-
-    channel.sent = [];
-    vi.setSystemTime(RAMP_UP_MS); // ramp-up window elapses
-    channel.drain(); // resumes the loop, now in the measured phase
-
-    const measuredFrames = channel.sent.map((b) => parseBulkFrame(b)!);
-    expect(measuredFrames.length).toBeGreaterThan(0);
-    expect(measuredFrames.every((f) => f.kind === "measured")).toBe(true);
-    expect(measuredFrames.map((f) => f.seq)).toEqual(measuredFrames.map((_, i) => i));
-
-    channel.sent = [];
-    vi.setSystemTime(RAMP_UP_MS + 1000); // measured deadline elapses
-    channel.drain();
-
-    const tail = channel.sent.map((b) => parseBulkFrame(b)!);
-    expect(tail).toHaveLength(1);
-    expect(tail[0].kind).toBe("end");
-    expect(tail[0].seq).toBe(sender.sentMeasuredChunks);
-    expect(completedWith).toBe(sender.sentMeasuredChunks);
+    // A generous buffer (throughput.ts's backpressure threshold) means a
+    // small test transfer like this one can complete within very few
+    // drain cycles rather than one distinct burst per phase — advance in
+    // small steps and drain after each until the sender finishes, then
+    // check the shape of the *whole* recorded sequence instead of
+    // snapshotting between phases.
+    for (let i = 0; i < 300 && completedWith === undefined; i++) {
+      vi.setSystemTime(i * 10);
+      channel.drain();
+    }
     expect(completedWith).toBeGreaterThan(0);
+
+    const frames = channel.sent.map((b) => parseBulkFrame(b)!);
+    const rampUp = frames.filter((f) => f.kind === "ramp-up");
+    const measured = frames.filter((f) => f.kind === "measured");
+    const end = frames.filter((f) => f.kind === "end");
+
+    expect(rampUp.length).toBeGreaterThan(0);
+    expect(rampUp.every((f) => f.seq === 0)).toBe(true);
+    expect(measured.length).toBeGreaterThan(0);
+    expect(measured.map((f) => f.seq)).toEqual(measured.map((_, i) => i));
+    expect(end).toHaveLength(1);
+    expect(end[0].seq).toBe(sender.sentMeasuredChunks);
+    expect(completedWith).toBe(sender.sentMeasuredChunks);
+
+    // Every ramp-up frame precedes every measured frame, which precedes
+    // the single end frame — no interleaving or reordering.
+    const kinds = frames.map((f) => f.kind);
+    const lastRampUp = kinds.lastIndexOf("ramp-up");
+    const firstMeasured = kinds.indexOf("measured");
+    expect(lastRampUp).toBeLessThan(firstMeasured);
+    expect(kinds[kinds.length - 1]).toBe("end");
   });
 
   it("stops sending mid-buffer without ever exceeding the low-water threshold at rest", () => {
@@ -172,11 +182,13 @@ describe("BulkSender", () => {
     sender.start();
     // The loop checks bufferedAmount *before* each send, so the very last
     // send that crosses the threshold is still allowed through — bounded
-    // overshoot of at most one chunk, never unbounded queuing.
+    // overshoot of at most one frame (payload + the 22-byte header), never
+    // unbounded queuing.
+    const frameBytes = 1000 + BULK_FRAME_HEADER_BYTES;
     expect(channel.bufferedAmount).toBeLessThanOrEqual(
-      channel.bufferedAmountLowThreshold + 1000,
+      channel.bufferedAmountLowThreshold + frameBytes,
     );
-    expect(channel.bufferedAmount).toBeGreaterThan(channel.bufferedAmountLowThreshold - 1000);
+    expect(channel.bufferedAmount).toBeGreaterThan(channel.bufferedAmountLowThreshold - frameBytes);
   });
 
   it("stop() prevents any further sends, including the end marker", () => {
