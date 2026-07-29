@@ -45,6 +45,13 @@ const CLASSIFICATION_POLL_INTERVAL_MS = 200;
 // wins late (Negotiation contract).
 const CLASSIFICATION_SETTLE_WINDOW_MS = 1000;
 
+// Some WebKit/Safari versions aggregate `connectionState` to "failed" for a
+// moment while ICE is still pruning/rechecking other candidate pairs after
+// nomination, then recover to "connected" on their own without any restart.
+// Confirming the failure still holds after a short grace window avoids
+// tearing down a connection that was never actually broken.
+const CONNECTION_FAILURE_CONFIRM_MS = 3000;
+
 const FORCE_RELAY_QUERY_PARAM = "forceRelay";
 
 /** Test-only switch: `?forceRelay=1` in the URL. Named in code, not left to
@@ -122,6 +129,7 @@ export class WebrtcConnection {
   private torndown = false;
   private connectionType: ConnectionType = "UNKNOWN";
   private classifying = false;
+  private failureConfirmTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(opts: WebrtcOptions) {
     this.slot = opts.slot;
@@ -147,9 +155,29 @@ export class WebrtcConnection {
       const state = this.pc.connectionState;
       this.callbacks.onConnectionStateChange?.(state);
       if (state === "connected") {
+        this.clearFailureConfirmTimer();
         void this.startClassification();
       } else if (state === "failed") {
-        this.callbacks.onFailure?.("ice-failed");
+        this.scheduleFailureConfirm();
+      } else {
+        // Any other transition (disconnected, connecting, closed, …)
+        // cancels a pending failure confirmation — a "failed" report that
+        // moved on to something else clearly wasn't a lasting failure.
+        this.clearFailureConfirmTimer();
+      }
+    };
+
+    // Diagnostic only: `iceConnectionState` is the more granular, more
+    // consistently implemented signal across browsers. Logged so a
+    // browser-specific disconnect (e.g. Safari/WebKit's looser
+    // `connectionState` aggregation) is visible in the console instead of
+    // only showing up as an unexplained close on the wire.
+    this.pc.oniceconnectionstatechange = () => {
+      const iceState = this.pc.iceConnectionState;
+      if (iceState === "disconnected" || iceState === "failed") {
+        console.warn(
+          `webrtc: iceConnectionState=${iceState} (connectionState=${this.pc.connectionState})`,
+        );
       }
     };
 
@@ -248,6 +276,7 @@ export class WebrtcConnection {
     this.torndown = true;
     this.producing = false;
     this.pendingCandidates = [];
+    this.clearFailureConfirmTimer();
     try {
       this.controlChannel?.close();
     } catch {
@@ -262,6 +291,23 @@ export class WebrtcConnection {
       this.pc.close();
     } catch {
       // already closed
+    }
+  }
+
+  private scheduleFailureConfirm(): void {
+    if (this.failureConfirmTimer) return; // already waiting on one
+    this.failureConfirmTimer = setTimeout(() => {
+      this.failureConfirmTimer = null;
+      if (!this.torndown && this.pc.connectionState === "failed") {
+        this.callbacks.onFailure?.("ice-failed");
+      }
+    }, CONNECTION_FAILURE_CONFIRM_MS);
+  }
+
+  private clearFailureConfirmTimer(): void {
+    if (this.failureConfirmTimer) {
+      clearTimeout(this.failureConfirmTimer);
+      this.failureConfirmTimer = null;
     }
   }
 
