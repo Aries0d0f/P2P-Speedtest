@@ -9,7 +9,9 @@
 		"deploy": "bun run build && wrangler deploy",
 		"preview": "bun run build && vite preview",
 		"cf-typegen": "wrangler types",
-		"postinstall": "wrangler types"
+		"migration:schema": "wrangler r2 object put sws/shared/schemas/p2p-speedtest-result.v1.schema.yaml --file ./schemas/p2p-speedtest-result.schema.yaml --remote",
+		"postinstall": "wrangler types",
+		"postdeploy": "bun run migration:schema"
 	},
 	"dependencies": {
 		"isbot": "^5.1.36",
