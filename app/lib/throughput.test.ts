@@ -237,6 +237,91 @@ describe("BulkSender", () => {
     }
   });
 
+  it("seqStart/seqStride let independent striped senders share one sequence space with no collisions", () => {
+    vi.setSystemTime(RAMP_UP_MS);
+    const channelA = new FakeChannel();
+    const channelB = new FakeChannel();
+    let completedA: number | undefined;
+    let completedB: number | undefined;
+
+    // Two independent BulkSenders — as two Worker threads would each run
+    // their own — striped 0,2,4,... and 1,3,5,... so neither ever produces
+    // a seq the other already used.
+    const senderA = new BulkSender({
+      channels: [channelA],
+      runId: RUN_ID,
+      stageId: 0,
+      chunkBytes: 1000,
+      maxDurationMs: 1000,
+      maxBytes: 5000, // exactly 5 measured chunks
+      rampUpMs: 0,
+      seqStart: 0,
+      seqStride: 2,
+      onComplete: (n) => (completedA = n),
+    });
+    const senderB = new BulkSender({
+      channels: [channelB],
+      runId: RUN_ID,
+      stageId: 0,
+      chunkBytes: 1000,
+      maxDurationMs: 1000,
+      maxBytes: 5000,
+      rampUpMs: 0,
+      seqStart: 1,
+      seqStride: 2,
+      onComplete: (n) => (completedB = n),
+    });
+
+    senderA.start();
+    senderB.start();
+    vi.setSystemTime(RAMP_UP_MS + 1000);
+    channelA.drain();
+    channelB.drain();
+
+    const seqsA = channelA.sent.map((b) => parseBulkFrame(b)!).filter((f) => f.kind === "measured").map((f) => f.seq);
+    const seqsB = channelB.sent.map((b) => parseBulkFrame(b)!).filter((f) => f.kind === "measured").map((f) => f.seq);
+
+    expect(seqsA).toEqual([0, 2, 4, 6, 8]);
+    expect(seqsB).toEqual([1, 3, 5, 7, 9]);
+    // No overlap between the two stripes.
+    expect(seqsA.some((s) => seqsB.includes(s))).toBe(false);
+
+    // The reported count is each sender's own number of chunks sent, not
+    // the raw (stride-spaced) seq value — both senders sent exactly 5.
+    expect(completedA).toBe(5);
+    expect(completedB).toBe(5);
+    expect(senderA.sentMeasuredChunks).toBe(5);
+    expect(senderB.sentMeasuredChunks).toBe(5);
+
+    // The end marker's seq is the count too, not a raw stride value.
+    const endA = channelA.sent.map((b) => parseBulkFrame(b)!).find((f) => f.kind === "end");
+    expect(endA?.seq).toBe(5);
+  });
+
+  it("defaults (no seqStart/seqStride) reproduce plain 0,1,2,... numbering", () => {
+    vi.setSystemTime(RAMP_UP_MS);
+    const channel = new FakeChannel();
+    let completed: number | undefined;
+    const sender = new BulkSender({
+      channels: [channel],
+      runId: RUN_ID,
+      stageId: 0,
+      chunkBytes: 1000,
+      maxDurationMs: 1000,
+      maxBytes: 3000,
+      rampUpMs: 0,
+      onComplete: (n) => (completed = n),
+    });
+    sender.start();
+    vi.setSystemTime(RAMP_UP_MS + 1000);
+    channel.drain();
+
+    const seqs = channel.sent.map((b) => parseBulkFrame(b)!).filter((f) => f.kind === "measured").map((f) => f.seq);
+    expect(seqs).toEqual([0, 1, 2]);
+    expect(completed).toBe(3);
+    expect(sender.sentMeasuredChunks).toBe(3);
+  });
+
   it("stop() prevents any further sends, including the end marker", () => {
     vi.setSystemTime(0);
     const channel = new FakeChannel();

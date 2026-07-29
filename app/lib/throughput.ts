@@ -149,10 +149,23 @@ export interface BulkSenderOptions {
   maxDurationMs: number;
   maxBytes: number;
   rampUpMs?: number;
+  /** Striped sequence assignment (worker-bulk revision): this sender's
+   * measured frames use `seqStart, seqStart + seqStride, seqStart +
+   * 2*seqStride, ...` instead of `0, 1, 2, ...`. Lets `N` independent
+   * senders (e.g. one per Worker thread, one per channel) share one
+   * measured-sequence space with zero cross-thread coordination — each
+   * one's stripe is disjoint by construction, so a receiver merging their
+   * output never sees a collision. Defaults (`seqStart: 0, seqStride: 1`)
+   * reproduce today's single-sender numbering exactly. */
+  seqStart?: number;
+  seqStride?: number;
   /** Fires once, when the measured send loop and ramp-up are both done and
-   * the `end` marker has been sent. Carries `sentMeasuredChunks` — the
-   * authoritative denominator a stage's `stage-complete` must report. */
-  onComplete?: (sentMeasuredChunks: number) => void;
+   * the `end` marker has been sent. Carries this sender's own count of
+   * measured chunks sent (not a raw seq value — with striping those
+   * diverge). For a single default-numbered sender this is also the
+   * authoritative denominator a stage's `stage-complete` reports; a
+   * striped sender's caller sums every stripe's count for that instead. */
+  onComplete?: (localSentCount: number) => void;
 }
 
 type SenderPhase = "ramp-up" | "measured" | "done";
@@ -181,7 +194,8 @@ export class BulkSender {
   private readonly frameView: DataView;
 
   private phase: SenderPhase = "ramp-up";
-  private nextSeq = 0;
+  private nextSeq: number;
+  private localSentCount = 0;
   private bytesSent = 0;
   private rampUpEndsAt = 0;
   private measuredDeadlineAt = 0;
@@ -194,7 +208,14 @@ export class BulkSender {
     if (opts.channels.length === 0) {
       throw new RangeError("BulkSender: at least one channel is required");
     }
-    this.opts = { rampUpMs: RAMP_UP_MS, onComplete: opts.onComplete, ...opts };
+    this.opts = {
+      rampUpMs: RAMP_UP_MS,
+      seqStart: 0,
+      seqStride: 1,
+      onComplete: opts.onComplete,
+      ...opts,
+    };
+    this.nextSeq = this.opts.seqStart;
 
     this.frameBuffer = new ArrayBuffer(BULK_FRAME_HEADER_BYTES + this.opts.chunkBytes);
     this.frameBytes = new Uint8Array(this.frameBuffer);
@@ -209,8 +230,12 @@ export class BulkSender {
     this.onBufferedLowByChannel = this.opts.channels.map(() => () => this.pump());
   }
 
+  /** Count of measured chunks this sender has sent — for the default,
+   * unstriped case this is also the highest seq used plus one; a striped
+   * sender's own `nextSeq` is a raw seq value instead and diverges from
+   * this count, which is why this getter tracks it separately. */
   get sentMeasuredChunks(): number {
-    return this.nextSeq;
+    return this.localSentCount;
   }
 
   start(): void {
@@ -286,7 +311,9 @@ export class BulkSender {
       this.finish();
       return false;
     }
-    const seq = this.nextSeq++;
+    const seq = this.nextSeq;
+    this.nextSeq += this.opts.seqStride;
+    this.localSentCount++;
     this.sendFrame(channel, seq, "measured");
     this.bytesSent += this.opts.chunkBytes;
     return true;
@@ -297,7 +324,7 @@ export class BulkSender {
     const endFrame = encodeBulkFrame({
       runId: this.opts.runId,
       stageId: this.opts.stageId,
-      seq: this.nextSeq,
+      seq: this.localSentCount,
       kind: "end",
       data: new Uint8Array(0),
     });
@@ -306,7 +333,7 @@ export class BulkSender {
     // one arrives, for the cost of a few 22-byte frames.
     for (const channel of this.opts.channels) this.sendRaw(channel, endFrame);
     this.stop();
-    this.opts.onComplete?.(this.nextSeq);
+    this.opts.onComplete?.(this.localSentCount);
   }
 
   /** Writes `seq`/kind into the reused frame buffer and sends it — the hot
