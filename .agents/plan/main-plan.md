@@ -21,7 +21,8 @@ Implementation plans:
 [Phase 2](./02-webrtc-connection.md) ·
 [Phase 3](./03-latency-measurement.md) ·
 [Phase 4](./04-throughput-measurement.md) ·
-[Phase 5](./05-results-polish.md)
+[Phase 5](./05-results-polish.md) ·
+[Phase 6](./06-live-test-visualization.md)
 
 ## Goal
 
@@ -48,8 +49,9 @@ and permanently recorded.
 3. As either peer, I confirm my display name and privacy level before joining.
 4. As either peer, I can see who I connected to and whether the path is direct
    or relayed before measurement starts.
-5. As either peer, I see live latency and throughput while the same three-stage
-   test runs on both devices.
+5. As either peer, I see our shared locations and transfer path on an
+   auto-oriented globe, alongside live latency and throughput, while the
+   same three-stage test runs on both devices.
 6. As either peer, I receive an honest result, including partial results when
    measurement started but could not finish.
 7. As a returning user, I can view, export, import, and copy results stored in
@@ -63,6 +65,8 @@ and permanently recorded.
 - Direct WebRTC with STUN and TURN fallback.
 - Current Chrome, Firefox, and Safari on desktop and mobile.
 - Local result history, import/export, and local result links.
+- A responsive, animated live-test dashboard with a 3D geographic view and
+  accessible numeric equivalents.
 - Clear handling of waiting, pairing, testing, cancellation, failure, expiry,
   and partial results.
 
@@ -264,6 +268,23 @@ Public surfaces:
   security control; the server is not in the data path and cannot enforce a
   modified client's transfer volume or reported measurements.
 
+### S11 — Live test visualization
+
+- During testing, both peers see a dotted 3D Earth with a world map and every
+  available peer location. A hidden or unavailable location is stated
+  clearly and never blocks the test.
+- Available peer locations are joined by the shortest raised route. The
+  globe keeps both peers visible, preserving Earth's real axial tilt on
+  desktop and placing the current peer left and the other peer right on
+  mobile.
+- The route and animated packages are cyan when this browser receives,
+  violet when it sends, and green in both directions during duplex.
+- A live speed graph and dashboard-style gauge accompany the globe. Duplex
+  directions remain visibly separate rather than being combined.
+- The dashboard is an enhancement: live numeric metrics, status, and test
+  controls remain usable if a location or visual effect is unavailable, and
+  visualization never changes the measurement or result.
+
 ## Delivery map
 
 Each phase must leave a working, demonstrable increment.
@@ -275,6 +296,7 @@ Each phase must leave a working, demonstrable increment.
 | 3 — Latency | Symmetric live RTT and jitter over the control channel | S5 |
 | 4 — Throughput and records | Three measurement stages, loss, result exchange, validation, checksum, local write | S5, S6, S10 |
 | 5 — Results and sign-off | History/detail, import/export, sharing, robustness, responsive and browser verification | S7, S8 |
+| 6 — Live test visualization | Peer globe, transfer visualization, live graph and gauge, graceful fallback | S8, S11 |
 
 Phases are implemented in order. Detailed work, dependencies, risks, and
 exit checks live in the linked phase plans.
@@ -287,6 +309,14 @@ exit checks live in the linked phase plans.
 - [ ] Privacy choices are independently enforced at the sending peer and the
       signaling path contains no peer profile or result data.
 - [ ] Both peers see live latency, jitter, loss, and throughput.
+- [ ] With two shared locations, both peers see the same shorter geographic
+      route and both markers remain visible; desktop preserves Earth's axial
+      tilt and mobile places self left/peer right.
+- [ ] Directional arc, particles, graph, and gauge use local-scope cyan
+      receive / violet send semantics, while duplex shows two green
+      directions without combining their measurements.
+- [ ] An unavailable location or visual enhancement retains usable numeric
+      metrics and controls and does not alter the measurement or result.
 - [ ] Download, upload, and duplex run in order and remain distinct in the
       stored and displayed result.
 - [ ] A complete run produces schema-valid, byte-identical `data` and hashes
@@ -308,5 +338,7 @@ exit checks live in the linked phase plans.
 - **Status: APPROVED**
 
 ### Assessment
-- All review findings are resolved. S1–S10, the result schema, and the five
-  implementation plans now form one coherent product contract.
+- S1–S11, the result schema, and the six implementation plans form one
+  coherent product contract. Phase-specific technology, algorithms,
+  fallbacks, performance budgets, and test procedures live in
+  [Phase 6](./06-live-test-visualization.md), not this main plan.

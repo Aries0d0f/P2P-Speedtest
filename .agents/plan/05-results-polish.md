@@ -1,9 +1,9 @@
-# Phase 5 — Results Page, Polish, and Sign-off
+# Phase 5 — Results Page, Polish, and Core Sign-off
 
 > **Status**: APPROVED
 > **Created**: 2026-07-29
 > **Implements**: [main-plan.md](./main-plan.md) — S7 (persistence, import,
-> export), S8 (results page), plus final sign-off
+> export), S8 (results page), plus core-flow sign-off
 > **Builds on**: [Phase 4](./04-throughput-measurement.md) — the records it
 > writes, the shared hash, and the validation foundation
 > **Conforms to**: `schemas/p2p-speedtest-result.v1.schema.yaml`
@@ -11,8 +11,9 @@
 ## Goal
 
 Build `/results` — list, detail, import, export, sharing — then close the
-remaining robustness gaps so the main plan's acceptance criteria can be
-signed off with evidence.
+remaining core-flow robustness gaps with evidence. Phase 6 owns the
+live-test globe, graph, gauge, animation fallbacks, and their final visual
+performance sign-off.
 
 ## Design notes
 
@@ -323,8 +324,8 @@ browsers are supported, so these are real targets rather than best-effort.
       all three pages.
 - [ ] Full cross-browser pass (Chrome, Firefox, Safari), including a
       forced-relay run per browser.
-- [ ] Every main-plan acceptance criterion is checked off, with the evidence
-      log below filled in.
+- [ ] Every main-plan criterion owned by Phases 1–5 is checked off, with the
+      evidence log below filled in.
 - [ ] `bun run typecheck` and `bun run build` pass.
 
 ## Acceptance evidence log
@@ -362,9 +363,11 @@ can start as soon as Phase 4 is done; its results-page half needs 5.2. 5.6
 is the least coupled and can be picked up incrementally rather than strictly
 last.
 
-This is the last phase. It closes out the product: verify every main-plan
-acceptance criterion, with the evidence log filled in, before calling the
-work done.
+Do not start Phase 6 until every 5.6 room-state matrix case has its stated
+persistence outcome and the responsive room page has stable
+`testing → finalizing → result` transitions, live numeric metrics, and a
+working Cancel action — Phase 6 adds an optional visualization around that
+exact fallback surface.
 
 ## Review Feedback (Codex, 2026-07-29)
 
