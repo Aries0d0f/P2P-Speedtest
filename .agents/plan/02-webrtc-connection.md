@@ -212,21 +212,35 @@ drive offer/answer negotiation from signaling messages, exchange ICE
 candidates, and expose connection-state changes as callbacks. Keep WebRTC
 plumbing out of the route component.
 
-**Create every channel here, before slot 0's initial offer:**
+**Revised (04-throughput-measurement.md "Revision: parallel
+`RTCPeerConnection`s") — this is now one connection, one channel:**
+`WebrtcConnection` is instantiated once per `(connIndex, role)` pair, each
+instance owning exactly one `RTCPeerConnection` and exactly one data
+channel. room.tsx creates `BULK_CONNECTION_COUNT + 1` instances per run —
+one `control` connection (`connIndex` 0) plus `BULK_CONNECTION_COUNT` `bulk`
+connections (`connIndex` 1..`BULK_CONNECTION_COUNT`, via `bulkConnIndex`) —
+rather than one connection carrying several channels. The reason is genuine
+parallelism: every data channel on one `RTCPeerConnection` shares that
+connection's single SCTP association (one DTLS session, one congestion
+window), so multiple channels on one connection cannot exceed what that one
+association can do. Multiple connections each get their own ICE
+negotiation, DTLS session, and SCTP association — independent congestion
+windows, the same lever parallel TCP/WebSocket connections use.
 
-| Label | Config | Used by |
+| Role (`connIndex`) | Config | Used by |
 |---|---|---|
-| `control` | reliable, ordered | 2.6's profile exchange, Phase 3's ping/pong, Phase 4's stage FSM and result exchange |
-| `bulk-0..bulk-{N-1}` (`BULK_CHANNEL_COUNT`, revised — see 04-throughput-measurement.md "Revision: parallel bulk channels") | `ordered: false, maxRetransmits: 0` each | Phase 4's throughput payload |
+| `control` (0) | reliable, ordered | 2.6's profile exchange, Phase 3's ping/pong, Phase 4's stage FSM and result exchange |
+| `bulk` (1..`BULK_CONNECTION_COUNT`) | `ordered: false, maxRetransmits: 0` | Phase 4's throughput payload |
 
-Slot 1 accepts every one by label via `ondatachannel`, registered before it
-applies the offer.
+Slot 1 accepts each instance's one channel via `ondatachannel`, registered
+before it applies that instance's offer. Each instance's own
+offer/answer/ice-candidate carries its own `connIndex` (01's revision) so
+the receiving side's `BULK_CONNECTION_COUNT + 1` instances stay correctly
+paired; the DO relays every one of them exactly as before, opaquely.
 
-Every channel is created in this phase even though later phases own what
-flows over them: a channel added to an already-connected peer connection
-triggers SDP renegotiation, and there is no renegotiation flow. Creating
-them all with the first offer means there is never a second one — and this
-phase needs `control` itself, for the profile exchange.
+Every connection's channel is still created before its first offer, for the
+same original reason: a channel added to an already-connected peer
+connection triggers SDP renegotiation, and there is no renegotiation flow.
 
 Implement the three rules from "Negotiation contract", and expose a
 `stopProducing()` / `teardown()` pair that obeys the terminal ordering in

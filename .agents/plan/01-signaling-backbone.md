@@ -115,6 +115,15 @@ status, or result records — those travel peer-to-peer over the data channel
 (S3, S6). A message type that would route peer data through the DO is a
 design change, not an extension.
 
+**Revision (04-throughput-measurement.md, parallel `RTCPeerConnection`s):**
+`offer`/`answer`/`ice-candidate` gained a `connIndex: number` field, stamped
+by the sending peer and read only by the receiving peer to pair a
+negotiation message with the right one of their several connections. This
+is a field addition to an existing opaque-relay type, not a new type — the
+DO's `relayIfCurrentRun` already forwards these three envelopes verbatim
+without inspecting their shape beyond `isEnvelope`'s structural check, so
+it required no code change at all.
+
 **`runId` is a UUIDv4** with one representation per transport: canonical
 lowercase text in JSON envelopes, and the same 16 bytes in network order in
 Phase 4's binary bulk header. Ship encode/decode round-trip fixtures — the
