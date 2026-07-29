@@ -214,9 +214,11 @@ describe("StageOrchestrator (two linked peers)", () => {
     vi.useRealTimers();
   });
 
+  const TEST_BULK_CHANNEL_COUNT = 3;
+
   function setup(testConfig = { maxDurationMs: 300, maxBytes: 20_000, chunkBytes: 1000 }) {
-    const bulkA = new RelayChannel();
-    const bulkB = new RelayChannel();
+    const bulkA = Array.from({ length: TEST_BULK_CHANNEL_COUNT }, () => new RelayChannel());
+    const bulkB = Array.from({ length: TEST_BULK_CHANNEL_COUNT }, () => new RelayChannel());
 
     let orchA!: StageOrchestrator;
     let orchB!: StageOrchestrator;
@@ -233,7 +235,7 @@ describe("StageOrchestrator (two linked peers)", () => {
       selfSlot: 0,
       testConfig,
       send: linkControl(RUN_ID, () => orchB),
-      bulkChannel: bulkA,
+      bulkChannels: bulkA,
       callbacks: {
         onEdgeBanked: (e) => bankedA.push(e),
         onStagesDone: () => (doneA = true),
@@ -245,7 +247,7 @@ describe("StageOrchestrator (two linked peers)", () => {
       selfSlot: 1,
       testConfig,
       send: linkControl(RUN_ID, () => orchA),
-      bulkChannel: bulkB,
+      bulkChannels: bulkB,
       callbacks: {
         onEdgeBanked: (e) => bankedB.push(e),
         onStagesDone: () => (doneB = true),
@@ -253,8 +255,10 @@ describe("StageOrchestrator (two linked peers)", () => {
       },
     });
 
-    bulkA.onFrame = (data) => orchB.handleBulkFrame(parseBulkFrame(data)!);
-    bulkB.onFrame = (data) => orchA.handleBulkFrame(parseBulkFrame(data)!);
+    // Same-index channels are wired to each other, matching how webrtc.ts
+    // pairs "bulk-N" on one side with "bulk-N" on the other.
+    bulkA.forEach((c) => (c.onFrame = (data) => orchB.handleBulkFrame(parseBulkFrame(data)!)));
+    bulkB.forEach((c) => (c.onFrame = (data) => orchA.handleBulkFrame(parseBulkFrame(data)!)));
 
     return {
       orchA,
@@ -284,7 +288,7 @@ describe("StageOrchestrator (two linked peers)", () => {
     t.orchA.start();
     t.orchB.start();
 
-    advance([t.bulkA, t.bulkB], 15_000, 25);
+    advance([...t.bulkA, ...t.bulkB], 15_000, 200);
 
     expect(t.doneA).toBe(true);
     expect(t.doneB).toBe(true);
@@ -309,7 +313,7 @@ describe("StageOrchestrator (two linked peers)", () => {
     const t = setup();
     t.orchA.start();
     t.orchB.start();
-    advance([t.bulkA, t.bulkB], 15_000, 25);
+    advance([...t.bulkA, ...t.bulkB], 15_000, 200);
 
     const download = t.orchA.getBank().find((e) => e.stageId === 0)!;
     const upload = t.orchA.getBank().find((e) => e.stageId === 1)!;
@@ -322,7 +326,7 @@ describe("StageOrchestrator (two linked peers)", () => {
     const t = setup();
     t.orchA.start();
     t.orchB.start();
-    advance([t.bulkA, t.bulkB], 15_000, 25);
+    advance([...t.bulkA, ...t.bulkB], 15_000, 200);
 
     for (const entry of t.orchA.getBank()) {
       const match = t.orchB
@@ -343,7 +347,7 @@ describe("StageOrchestrator (two linked peers)", () => {
       selfSlot: 0,
       testConfig,
       send: () => {}, // every outbound message from A vanishes — no peer ever responds
-      bulkChannel: bulkA,
+      bulkChannels: [bulkA],
       callbacks: { onTimeout: () => (timeoutA = true), onStagesDone: () => (doneA = true) },
     });
 
