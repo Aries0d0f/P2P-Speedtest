@@ -187,7 +187,7 @@ function ResultSummary({
       <button
         type="button"
         onClick={onNewRoom}
-        className="rounded-full border border-gray-300 px-4 py-2 text-sm font-medium text-gray-900 dark:border-gray-600 dark:text-gray-100"
+        className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-900 dark:border-gray-600 dark:text-gray-100"
       >
         Start a new room
       </button>
@@ -1003,7 +1003,7 @@ export default function Room({ params }: Route.ComponentProps) {
           <button
             type="submit"
             disabled={!gateProfile}
-            className="rounded-full bg-gray-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900"
+            className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900"
           >
             Join room
           </button>
@@ -1123,7 +1123,7 @@ export default function Room({ params }: Route.ComponentProps) {
                 type="button"
                 disabled={phase === "finalizing"}
                 onClick={() => cancelTestRef.current()}
-                className="rounded-full border border-gray-300 px-4 py-2 text-sm font-medium text-gray-900 disabled:opacity-50 dark:border-gray-600 dark:text-gray-100"
+                className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-900 disabled:opacity-50 dark:border-gray-600 dark:text-gray-100"
               >
                 Cancel
               </button>
