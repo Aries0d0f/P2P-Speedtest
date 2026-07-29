@@ -1,0 +1,28 @@
+{
+  "extends": "./tsconfig.json",
+  // Explicit dependency closure of bulk-worker.ts (not a glob): those
+  // files are also covered by tsconfig.cloudflare.json's DOM-lib program,
+  // and overlap across composite projects is fine — but a glob here would
+  // pull in DOM-only files (webrtc.ts, room.tsx, ...) that don't compile
+  // under WebWorker lib.
+  "include": [
+    "app/lib/bulk-worker.ts",
+    "app/lib/throughput.ts",
+    "app/lib/worker-bulk-protocol.ts",
+    "app/lib/stage.ts",
+    "app/lib/uuid-bytes.ts"
+  ],
+  "compilerOptions": {
+    "composite": true,
+    "strict": true,
+    "lib": ["ESNext", "WebWorker"],
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "paths": {
+      "~/*": ["./app/*"]
+    },
+    "esModuleInterop": true,
+    "resolveJsonModule": true
+  }
+}

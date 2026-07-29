@@ -8,6 +8,10 @@
     "workers/**/*",
     "worker-configuration.d.ts"
   ],
+  // bulk-worker.ts runs in a browser Worker scope, not DOM — its globals
+  // (self, postMessage, close, …) conflict with this program's DOM lib.
+  // It has its own referenced project (tsconfig.worker.json) instead.
+  "exclude": ["app/lib/bulk-worker.ts"],
   "compilerOptions": {
     "composite": true,
     "strict": true,
