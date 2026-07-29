@@ -20,6 +20,11 @@ const FAST_TIMING = {
   idleWindowMs: 150,
   heartbeatIntervalMs: 40,
   finalizationGraceMs: 60,
+  // 0 so a room's whole (shrunk) hard-expiry window doesn't itself trip the
+  // TTL floor below — that path gets its own dedicated hardExpiryMs/floor
+  // pairing in the "ice-servers issuance" tests instead.
+  turnCredentialDefaultTtlMs: 60 * 60 * 1000,
+  turnCredentialFloorMs: 0,
 };
 
 function getStub(name: string) {
@@ -185,6 +190,78 @@ describe("connection and peer assignment", () => {
     expect(b.messages.find((m) => m.type === "ice-candidate")?.payload).toBe(
       "hello from a",
     );
+  });
+});
+
+describe("ice-servers issuance", () => {
+  it("sends both peers a run-stamped ice-servers message once the run starts", async () => {
+    const stub = getStub("room-ice-servers-1");
+    await stub.claim("room-ice-servers-1");
+
+    const a = await connect(stub);
+    const b = await connect(stub);
+    await waitFor(
+      () =>
+        a.messages.some((m) => m.type === "run-started") &&
+        b.messages.some((m) => m.type === "run-started"),
+    );
+    const runId = a.messages.find((m) => m.type === "run-started")!.runId;
+
+    await waitFor(
+      () =>
+        a.messages.some((m) => m.type === "ice-servers") &&
+        b.messages.some((m) => m.type === "ice-servers"),
+    );
+
+    const aIce = a.messages.find((m) => m.type === "ice-servers")!;
+    const bIce = b.messages.find((m) => m.type === "ice-servers")!;
+    expect(aIce.runId).toBe(runId);
+    expect(bIce.runId).toBe(runId);
+    // No TURN secret is configured in the test environment, so the
+    // provider adapter returns null and this exercises the STUN-only
+    // fallback — same shape either way, just without the extra TURN entry.
+    expect(aIce.payload.iceServers).toEqual([
+      { urls: ["stun:stun.cloudflare.com:3478"] },
+    ]);
+    expect(bIce.payload.iceServers).toEqual(aIce.payload.iceServers);
+  });
+
+  it("a peer that waited well past a provider TTL before the second peer joins still gets ice-servers", async () => {
+    const stub = getStub("room-ice-servers-late-1");
+    await stub.claim("room-ice-servers-late-1");
+
+    const a = await connect(stub, { autoPong: true });
+    await waitFor(() => a.messages.some((m) => m.type === "peer-assigned"));
+    // Long enough to have missed a heartbeat if `a` weren't auto-ponging —
+    // proves a wait here has no bearing on credential freshness, since
+    // credentials mint at run-started rather than at accept.
+    await new Promise((r) => setTimeout(r, FAST_TIMING.heartbeatIntervalMs * 3));
+
+    const b = await connect(stub);
+    await waitFor(
+      () =>
+        a.messages.some((m) => m.type === "ice-servers") &&
+        b.messages.some((m) => m.type === "ice-servers"),
+    );
+    expect(a.messages.some((m) => m.type === "ice-servers")).toBe(true);
+  });
+
+  it("ends the room as expired instead of starting a run when less than the TTL floor remains", async () => {
+    setTimingForTesting({ turnCredentialFloorMs: 10_000 }); // >> hardExpiryMs
+    const stub = getStub("room-ice-servers-floor-1");
+    await stub.claim("room-ice-servers-floor-1");
+
+    const a = await connect(stub);
+    await waitFor(() => a.messages.some((m) => m.type === "peer-assigned"));
+    const b = await connect(stub);
+
+    await waitFor(() => a.messages.some((m) => m.type === "run-ended"));
+    expect(a.messages.find((m) => m.type === "run-ended")?.payload.reason).toBe(
+      "expired",
+    );
+    await waitFor(() => b.messages.some((m) => m.type === "run-ended"));
+    expect(a.messages.some((m) => m.type === "run-started")).toBe(false);
+    expect(a.messages.some((m) => m.type === "ice-servers")).toBe(false);
   });
 });
 

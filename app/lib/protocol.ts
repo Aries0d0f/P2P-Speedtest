@@ -48,11 +48,18 @@ export interface RunEndedPayload {
   reason: RunEndedReason;
 }
 
-// Phase 2 payloads: SDP/ICE data relayed verbatim, opaque to the DO.
-export type IceServersPayload = unknown;
-export type OfferPayload = unknown;
-export type AnswerPayload = unknown;
-export type IceCandidatePayload = unknown;
+// Phase 2 payloads. offer/answer/ice-candidate are SDP/ICE data relayed
+// verbatim between peers — the DO never inspects their contents, only
+// `isEnvelope`'s structural check and the run-scoping in `relayIfCurrentRun`
+// apply to them.
+export interface IceServersPayload {
+  iceServers: RTCIceServer[];
+}
+export type OfferPayload = RTCSessionDescriptionInit;
+export type AnswerPayload = RTCSessionDescriptionInit;
+// `null` is an explicit end-of-candidates marker; not every browser sends
+// one, so its absence must never be relied on (see 02-webrtc-connection.md).
+export type IceCandidatePayload = RTCIceCandidateInit | null;
 
 export type Envelope =
   | { type: "peer-assigned"; runId: null; payload: PeerAssignedPayload }

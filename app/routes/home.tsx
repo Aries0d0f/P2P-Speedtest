@@ -1,5 +1,11 @@
-import { useState, type SubmitEvent } from "react";
+import { useState, useEffect, type SubmitEvent } from "react";
 import { useNavigate } from "react-router";
+import { ProfileFields } from "~/components/ProfileFields";
+import {
+  defaultProfile,
+  saveProfile,
+  type ConfirmedProfile,
+} from "~/lib/peer-profile";
 import { resolveJoinInput, tokenToSlug } from "~/lib/room-token";
 
 import type { Route } from "./+types/home";
@@ -14,14 +20,36 @@ export function meta({}: Route.MetaArgs) {
   ];
 }
 
+const USER_AGENT = typeof navigator !== "undefined" ? navigator.userAgent : "";
+
 export default function Home() {
   const navigate = useNavigate();
+  const [profile, setProfile] = useState<ConfirmedProfile>();
+  useEffect(() => {
+    defaultProfile(USER_AGENT).then(setProfile);
+  }, []);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [joinInput, setJoinInput] = useState("");
   const [joinError, setJoinError] = useState<string | null>(null);
 
+  // Both entry paths confirm the same profile before entering a room (S8);
+  // "confirm" is just persisting it right before the action that opens one.
+  function confirmProfile(): ConfirmedProfile {
+    const confirmed = {
+      privacyLevel: "off" as const,
+      ...profile,
+      name: profile?.name.trim() ?? "",
+    };
+    saveProfile(confirmed);
+    return confirmed;
+  }
+
   async function handleCreate() {
+    if (!profile?.name.trim()) {
+      setCreateError("Enter a name before creating a room.");
+      return;
+    }
     setCreating(true);
     setCreateError(null);
     try {
@@ -34,7 +62,8 @@ export default function Home() {
         );
       }
       const { slug } = (await resp.json()) as { slug: string };
-      navigate(`/room/${slug}`);
+      const confirmed = confirmProfile();
+      navigate(`/room/${slug}`, { state: { profile: confirmed } });
     } catch (err) {
       setCreateError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -44,13 +73,18 @@ export default function Home() {
 
   function handleJoin(event: SubmitEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!profile?.name.trim()) {
+      setJoinError("Enter a name before joining a room.");
+      return;
+    }
     const token = resolveJoinInput(joinInput);
     if (token === null) {
       setJoinError("That doesn't look like a Room ID, emoji key, or link.");
       return;
     }
     setJoinError(null);
-    navigate(`/room/${tokenToSlug(token)}`);
+    const confirmed = confirmProfile();
+    navigate(`/room/${tokenToSlug(token)}`, { state: { profile: confirmed } });
   }
 
   return (
@@ -67,6 +101,22 @@ export default function Home() {
       <div className="flex w-full max-w-sm flex-col gap-6">
         <section className="flex flex-col gap-2 rounded-2xl border border-gray-200 p-5 dark:border-gray-700">
           <h2 className="text-sm font-medium text-gray-700 dark:text-gray-200">
+            Your profile
+          </h2>
+          <p className="text-xs text-gray-500 dark:text-gray-400">
+            Confirmed once here, then used whether you create or join below.
+          </p>
+          {profile && (
+            <ProfileFields
+              profile={profile}
+              onChange={setProfile}
+              userAgent={USER_AGENT}
+            />
+          )}
+        </section>
+
+        <section className="flex flex-col gap-2 rounded-2xl border border-gray-200 p-5 dark:border-gray-700">
+          <h2 className="text-sm font-medium text-gray-700 dark:text-gray-200">
             Create a test
           </h2>
           <button
@@ -78,7 +128,9 @@ export default function Home() {
             {creating ? "Creating…" : "Create a room"}
           </button>
           {createError && (
-            <p className="text-sm text-red-600 dark:text-red-400">{createError}</p>
+            <p className="text-sm text-red-600 dark:text-red-400">
+              {createError}
+            </p>
           )}
         </section>
 
@@ -102,7 +154,9 @@ export default function Home() {
             </button>
           </form>
           {joinError && (
-            <p className="text-sm text-red-600 dark:text-red-400">{joinError}</p>
+            <p className="text-sm text-red-600 dark:text-red-400">
+              {joinError}
+            </p>
           )}
         </section>
       </div>
