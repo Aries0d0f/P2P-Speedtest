@@ -1,25 +1,14 @@
 $schema: "https://json-schema.org/draft/2020-12/schema"
 $id: "https://sws.aries0d0f.me/schemas/p2p-speedtest-result.v1.schema.yaml"
 title: P2PSpeedtestResult
-description: >-
-  Envelope + result data for one peer's view of a completed (or
-  failed/canceled) P2P speedtest room. The `data` payload is ONLY ever
-  produced by the SignalingRoom Durable Object (never assembled or hashed
-  client-side — see master-plan.md's amendment #2 and its schema-amendment
-  resolution) and is byte-for-byte identical across both peers' stored
-  copies, including `metadata.hash`; only `metadata.peer-id` differs
-  between the two peers' records. `data.peers[].ip`/`protocol` are always
-  DO-observed (never dependent on the client-side geo lookup succeeding);
-  `data.via` is `UNKNOWN` when the test never reached ICE classification
-  (only `SUCCESSED` records are guaranteed a non-UNKNOWN `via`). A
-  finalization that the DO never completes (e.g. it crashes or the
-  signaling connection drops before `result-ready`) does not produce a
-  record at all — there is no locally-synthesized fallback envelope, by
-  design, so every stored `P2PSpeedtestResult` always carries a real
-  DO-computed `hash`.
+description: One peer's stored copy of a P2P speedtest result.
 type: object
 additionalProperties: false
-required: [apiVersion, kind, metadata, data]
+required:
+  - apiVersion
+  - kind
+  - metadata
+  - data
 properties:
   apiVersion:
     type: string
@@ -35,36 +24,18 @@ properties:
 $defs:
   roomId:
     type: string
-    description: >-
-      Room ID / slug as produced by Phase 1's room-token encoding
-      (app/lib/room-token.ts `tokenToSlug`). Exact charset must match that
-      implementation; this pattern is deliberately permissive
-      (alphanumeric, 9 chars) rather than hard-coding Crockford Base32's
-      exact excluded-letter set here, to avoid this schema drifting out of
-      sync with that module.
+    description: Room ID (9-character alphanumeric slug).
     pattern: "^[0-9A-Za-z]{9}$"
 
   peerId:
     type: string
     format: uuid
-    description: >-
-      UUIDv5 = `uuidv5(P2P_SPEEDTEST_NAMESPACE, "ip:<CF-Connecting-IP>|room:<roomId>")`,
-      where `P2P_SPEEDTEST_NAMESPACE` is the fixed namespace UUID
-      `7c522f7b-5c9f-5c64-8084-b4b10587c272` (itself
-      `uuidv5(NAMESPACE_URL, "https://sws.aries0d0f.me/p2p-speedtest")` —
-      computed once and hardcoded, never recomputed at runtime), `<roomId>`
-      is the room's slug (decision 1/3), and `<CF-Connecting-IP>` is the
-      DO's server-observed source IP at WebSocket accept time — this
-      schema only constrains the resulting *shape*: a
-      valid UUID with version nibble 5).
+    description: UUIDv5 identifying one peer within a room.
     pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 
   hash:
     type: string
-    description: >-
-      Hex digest over the canonical (stable-key-order) serialization of
-      the `data` object, used to detect corruption/tampering on import.
-      Assumed SHA-256 (64 hex chars) — see file-level note above.
+    description: SHA-256 hex digest of the canonical serialization of `data`.
     pattern: "^[0-9a-f]{64}$"
 
   ipAddress:
@@ -77,66 +48,92 @@ $defs:
     type: object
     additionalProperties: false
     description: >-
-      Geolocation for one peer's IP, self-reported by that peer's browser
-      after a client-side lookup against `https://ip.aries0d0f.me/?q=geo`
-      (an HTTPS/CORS-safe proxy in front of ip-api.com) during the
-      `pairing` phase, before the speedtest starts. All fields optional —
-      a failed or partial lookup should omit unknown fields rather than
-      sending nulls or placeholder strings. Field names/shapes match
-      ip-api.com's JSON response (minus its `status`/`query` fields, which
-      are lookup-request metadata, not geo data).
+      Optional geolocation for a peer's IP. All fields optional; a partial
+      or failed lookup simply omits the unknown fields.
     properties:
-      continent: { type: string }
-      continentCode: { type: string }
-      country: { type: string }
-      countryCode: { type: string }
-      region: { type: string }
-      regionName: { type: string }
-      city: { type: string }
-      district: { type: string }
-      zip: { type: string }
-      lat: { type: number, minimum: -90, maximum: 90 }
-      lon: { type: number, minimum: -180, maximum: 180 }
-      timezone: { type: string }
-      offset: { type: integer, description: "UTC offset in seconds" }
-      isp: { type: string }
-      org: { type: string }
-      as: { type: string }
-      asname: { type: string }
-      mobile: { type: boolean }
-      proxy: { type: boolean }
-      hosting: { type: boolean }
+      continent:
+        type: string
+      continentCode:
+        type: string
+      country:
+        type: string
+      countryCode:
+        type: string
+      region:
+        type: string
+      regionName:
+        type: string
+      city:
+        type: string
+      district:
+        type: string
+      zip:
+        type: string
+      lat:
+        type: number
+        minimum: -90
+        maximum: 90
+      lon:
+        type: number
+        minimum: -180
+        maximum: 180
+      timezone:
+        type: string
+      offset:
+        type: integer
+        description: UTC offset in seconds
+      isp:
+        type: string
+      org:
+        type: string
+      as:
+        type: string
+      asname:
+        type: string
+      mobile:
+        type: boolean
+      proxy:
+        type: boolean
+      hosting:
+        type: boolean
 
   peer:
     type: object
     additionalProperties: false
-    required: [id, ip, protocol, geo]
-    description: >-
-      `id`/`ip`/`protocol` are server-observed (the SignalingRoom DO's
-      `CF-Connecting-IP` at WebSocket accept time) — always available,
-      never dependent on a third-party call succeeding. Only `geo` comes
-      from the client-side lookup and may legitimately fail (see the
-      `geo` def) — a failed lookup means an empty `geo: {}`, never a
-      missing/placeholder `ip`.
+    required:
+      - id
+      - ip
+      - protocol
+      - geo
+    description: One peer connected to the room.
     properties:
-      id: { $ref: "#/$defs/peerId" }
-      ip: { $ref: "#/$defs/ipAddress" }
+      id:
+        $ref: "#/$defs/peerId"
+      ip:
+        $ref: "#/$defs/ipAddress"
       protocol:
         type: string
-        enum: [IPv4, IPv6]
-      geo: { $ref: "#/$defs/geo" }
+        enum:
+          - IPv4
+          - IPv6
+      geo:
+        $ref: "#/$defs/geo"
 
   bandwidthEdge:
     type: object
     additionalProperties: false
-    required: [from, to, speed, latency, jitter]
-    description: >-
-      One direction of the bidirectional throughput/latency measurement.
-      `from`/`to` must each be one of `data.peers[].id` (enforced in
-      application code, not expressible here).
+    required:
+      - from
+      - to
+      - speed
+      - latency
+      - jitter
+    description: Measured throughput and latency in one direction, between two peers.
     properties:
-      from: { $ref: "#/$defs/peerId" }
-      to: { $ref: "#/$defs/peerId" }
+      from:
+        $ref: "#/$defs/peerId"
+      to:
+        $ref: "#/$defs/peerId"
       speed:
         type: number
         minimum: 0
@@ -153,58 +150,70 @@ $defs:
   metadata:
     type: object
     additionalProperties: false
-    required: [id, "peer-id", hash]
+    required:
+      - id
+      - "peer-id"
+      - hash
     properties:
       id:
         $ref: "#/$defs/roomId"
-        description: Room ID this result belongs to (mirrors `data.room`).
+        description: Room ID this result belongs to.
       peer-id:
         $ref: "#/$defs/peerId"
-        description: The storing peer's own id — differs between the two peers' copies.
-      hash: { $ref: "#/$defs/hash" }
+        description: This record's own peer ID.
+      hash:
+        $ref: "#/$defs/hash"
 
   data:
     type: object
     additionalProperties: false
-    required: [room, status, timestamp, peers, bandwidth, via]
+    required:
+      - room
+      - status
+      - timestamp
+      - peers
+      - bandwidth
+      - via
     description: >-
-      `peers`/`bandwidth` require exactly 2 items when `status` is
-      SUCCESSED (a completed test always has two peers and both
-      directions measured). For FAILED/CANCELED, both arrays may be
-      shorter — as few as 0 `peers` (e.g. the room never got a second
-      peer) or 0 `bandwidth` edges (e.g. paired but the test never
-      started) — since the DO finalizes with whatever was actually
-      reported. See the `if`/`then` below for the exact rule.
+      Result of the test. `peers`/`bandwidth` have exactly two entries when
+      `status` is SUCCESSED; otherwise they may have fewer.
     properties:
-      room: { $ref: "#/$defs/roomId" }
+      room:
+        $ref: "#/$defs/roomId"
       status:
         type: string
-        enum: [SUCCESSED, FAILED, CANCELED]
+        enum:
+          - SUCCESSED
+          - FAILED
+          - CANCELED
+        description: Outcome of the test.
       timestamp:
         type: string
         format: date-time
-        description: ISO 8601 timestamp of test completion/termination.
+        description: ISO 8601 completion timestamp.
       peers:
         type: array
         maxItems: 2
-        items: { $ref: "#/$defs/peer" }
+        items:
+          $ref: "#/$defs/peer"
       bandwidth:
         type: array
         maxItems: 2
-        items: { $ref: "#/$defs/bandwidthEdge" }
+        items:
+          $ref: "#/$defs/bandwidthEdge"
       via:
         type: string
-        enum: [DIRECT, RELAY, UNKNOWN]
+        enum:
+          - DIRECT
+          - RELAY
+          - UNKNOWN
         description: >-
-          DIRECT if the ICE-selected candidate pair was host/srflx on both
-          sides; RELAY if either side used TURN; UNKNOWN if the test never
-          reached ICE classification (e.g. a peer never joined, or
-          disconnected before `paired`) — always required, but only
-          SUCCESSED records are guaranteed a non-UNKNOWN value (see the
-          `if`/`then` below).
+          DIRECT for a peer-to-peer connection, RELAY if TURN was used,
+          UNKNOWN if never determined.
     if:
       properties:
-        status: { const: SUCCESSED }
+        status:
+          const: SUCCESSED
     then:
       properties:
         peers:
@@ -212,4 +221,5 @@ $defs:
         bandwidth:
           minItems: 2
         via:
-          not: { const: UNKNOWN }
+          not:
+            const: UNKNOWN
