@@ -40,11 +40,17 @@ interface SlotAttachment {
   slot: Slot;
   peerId: string;
   gen: string;
+  sessionId: string | null;
 }
 
 interface HeartbeatDeadlines {
   pingDueAt: number;
   staleAt: number;
+  // Ties this deadline to the specific socket instance that created it. A
+  // slot's old occupant can be replaced and its close event only processed
+  // afterward; without this, that late close would delete the *new*
+  // occupant's fresh heartbeat entry out from under it.
+  gen: string;
 }
 
 function otherSlot(slot: Slot): Slot {
@@ -120,28 +126,57 @@ export class SignalingRoom extends DurableObject<Env> {
       }
 
       const runId = await this.ctx.storage.get<string | null>("runId");
+      const sessionId = new URL(request.url).searchParams.get("session");
+
+      let slot: Slot | undefined;
+
+      // A refresh opens a new socket before the old one is necessarily
+      // detected as gone, which would otherwise race the normal
+      // empty-or-stale slot pick below and pair the tab with itself in the
+      // other slot. A matching session id — a nonce private to this
+      // browser tab, never shared with the other peer — means this is
+      // provably the same tab reconnecting, so it takes its own slot back
+      // immediately regardless of staleness. Only pre-run: once a run has
+      // started a departure ends the room (S2), not a silent reconnect.
+      if (runId == null && sessionId) {
+        for (const [candidate, ws] of occupied) {
+          const attachment = ws.deserializeAttachment() as SlotAttachment | null;
+          if (attachment?.sessionId === sessionId) {
+            try {
+              ws.close(1000, "reconnected");
+            } catch {
+              // already gone
+            }
+            await this.ctx.storage.delete(`heartbeat:${candidate}`);
+            occupied.delete(candidate);
+            slot = candidate;
+            break;
+          }
+        }
+      }
 
       // "The first free slot in order — 0 if empty or stale, otherwise 1."
       // Replacing a live-but-unresponsive slot is only ever allowed before a
       // run has started; once runId is set both slots are guaranteed live
       // (see the reasoning in handleSlotGone), so this never opens a live
       // run's slot to a third joiner.
-      let slot: Slot | undefined;
-      for (const candidate of [0, 1] as const) {
-        if (!occupied.has(candidate)) {
-          slot = candidate;
-          break;
-        }
-        if (runId == null && (await this.isSlotStale(candidate))) {
-          try {
-            occupied.get(candidate)?.close(1000, "replaced");
-          } catch {
-            // already gone
+      if (slot === undefined) {
+        for (const candidate of [0, 1] as const) {
+          if (!occupied.has(candidate)) {
+            slot = candidate;
+            break;
           }
-          await this.ctx.storage.delete(`heartbeat:${candidate}`);
-          occupied.delete(candidate);
-          slot = candidate;
-          break;
+          if (runId == null && (await this.isSlotStale(candidate))) {
+            try {
+              occupied.get(candidate)?.close(1000, "replaced");
+            } catch {
+              // already gone
+            }
+            await this.ctx.storage.delete(`heartbeat:${candidate}`);
+            occupied.delete(candidate);
+            slot = candidate;
+            break;
+          }
         }
       }
       if (slot === undefined) {
@@ -156,12 +191,18 @@ export class SignalingRoom extends DurableObject<Env> {
       const client = pair[0];
       const server = pair[1];
       this.ctx.acceptWebSocket(server);
-      server.serializeAttachment({ slot, peerId, gen } satisfies SlotAttachment);
+      server.serializeAttachment({
+        slot,
+        peerId,
+        gen,
+        sessionId,
+      } satisfies SlotAttachment);
 
       const now = Date.now();
       await this.ctx.storage.put(`heartbeat:${slot}`, {
         pingDueAt: now + TIMING.heartbeatIntervalMs,
         staleAt: now + 2 * TIMING.heartbeatIntervalMs,
+        gen,
       } satisfies HeartbeatDeadlines);
       await this.ctx.storage.put("lastActivityAt", now);
 
@@ -249,6 +290,7 @@ export class SignalingRoom extends DurableObject<Env> {
         await this.ctx.storage.put(`heartbeat:${attachment.slot}`, {
           pingDueAt: now + TIMING.heartbeatIntervalMs,
           staleAt: now + 2 * TIMING.heartbeatIntervalMs,
+          gen: attachment.gen,
         } satisfies HeartbeatDeadlines);
         await this.scheduleAlarm();
         return;
@@ -272,13 +314,13 @@ export class SignalingRoom extends DurableObject<Env> {
   async webSocketClose(ws: WebSocket): Promise<void> {
     const attachment = ws.deserializeAttachment() as SlotAttachment | null;
     if (!attachment) return;
-    await this.handleSlotGone(attachment.slot, ws);
+    await this.handleSlotGone(attachment.slot, ws, attachment.gen);
   }
 
   async webSocketError(ws: WebSocket): Promise<void> {
     const attachment = ws.deserializeAttachment() as SlotAttachment | null;
     if (!attachment) return;
-    await this.handleSlotGone(attachment.slot, ws);
+    await this.handleSlotGone(attachment.slot, ws, attachment.gen);
   }
 
   // --- Alarm: hard expiry, heartbeat, finalization grace, idle cleanup ---
@@ -309,7 +351,7 @@ export class SignalingRoom extends DurableObject<Env> {
       if (!hb) continue;
 
       if (now >= hb.staleAt) {
-        const ended = await this.handleSlotGone(attachment.slot, ws);
+        const ended = await this.handleSlotGone(attachment.slot, ws, attachment.gen);
         if (ended) return;
       } else if (now >= hb.pingDueAt) {
         const runId = await this.ctx.storage.get<string | null>("runId");
@@ -317,6 +359,7 @@ export class SignalingRoom extends DurableObject<Env> {
         await this.ctx.storage.put(`heartbeat:${attachment.slot}`, {
           pingDueAt: now + TIMING.heartbeatIntervalMs,
           staleAt: hb.staleAt,
+          gen: attachment.gen,
         } satisfies HeartbeatDeadlines);
       }
     }
@@ -410,12 +453,27 @@ export class SignalingRoom extends DurableObject<Env> {
    * heartbeat timeout. Once a run has started, S2 makes the room terminal
    * rather than leaving the survivor waiting for a replacement. Returns
    * true if this call ended and cleaned up the room.
+   *
+   * `gen` identifies the specific socket instance this event is about. A
+   * close event can arrive after that slot has already been replaced (the
+   * old socket's own close, processed late), so the heartbeat entry is only
+   * deleted if it still belongs to this same generation — otherwise it
+   * belongs to whoever replaced it, and must be left alone.
    */
-  private async handleSlotGone(slot: Slot, ws?: WebSocket): Promise<boolean> {
+  private async handleSlotGone(
+    slot: Slot,
+    ws?: WebSocket,
+    gen?: string,
+  ): Promise<boolean> {
     const claimed = await this.ctx.storage.get<boolean>("claimed");
     if (!claimed) return true; // already cleaned up; ignore a stray event
 
-    await this.ctx.storage.delete(`heartbeat:${slot}`);
+    const currentHeartbeat = await this.ctx.storage.get<HeartbeatDeadlines>(
+      `heartbeat:${slot}`,
+    );
+    if (!currentHeartbeat || currentHeartbeat.gen === gen) {
+      await this.ctx.storage.delete(`heartbeat:${slot}`);
+    }
     if (ws) {
       try {
         ws.close(1000, "gone");
