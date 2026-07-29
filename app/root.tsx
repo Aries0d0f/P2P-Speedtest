@@ -45,6 +45,19 @@ export default function App() {
   return <Outlet />;
 }
 
+/**
+ * Rendered into the SPA-fallback shell used to hydrate any path other than
+ * "/" (see react-router.config.ts). Without this, the fallback would bake
+ * in whichever route happens to render for "/" instead of a neutral shell.
+ */
+export function HydrateFallback() {
+  return (
+    <main className="flex min-h-screen items-center justify-center px-4">
+      <p className="text-sm text-gray-500 dark:text-gray-400">Loading…</p>
+    </main>
+  );
+}
+
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
   let message = "Oops!";
   let details = "An unexpected error occurred.";
