@@ -6,6 +6,12 @@ import { ProfileFields } from "~/components/ProfileFields";
 import type { GeoInfo } from "~/lib/geo";
 import { fetchGeo } from "~/lib/geo";
 import {
+  decodeLatencyMessage,
+  LatencySession,
+  type Aggregate,
+  type LiveLatency,
+} from "~/lib/latency";
+import {
   buildEnrichmentProfileMessage,
   buildInitialProfileMessage,
   decodeProfileEnvelope,
@@ -33,7 +39,7 @@ interface PeerInfo {
   peerId: string;
 }
 
-type Phase = "waiting" | "pairing" | "paired";
+type Phase = "waiting" | "pairing" | "paired" | "testing";
 
 interface TerminalState {
   reason: string;
@@ -55,6 +61,7 @@ const TERMINAL_COPY: Record<string, string> = {
   "negotiation-failed": "Couldn't establish a connection.",
   "profile-timeout": "The other peer never confirmed who they are.",
   "channel-closed": "The connection was lost before pairing finished.",
+  "latency-ready-timeout": "The other peer's latency measurement never arrived.",
 };
 
 function terminalMessage(reason: string): string {
@@ -71,7 +78,8 @@ function terminalTone(reason: string): "expired" | "error" | "neutral" {
     reason === "negotiation-failed" ||
     reason === "profile-timeout" ||
     reason === "channel-closed" ||
-    reason === "finalization-timeout"
+    reason === "finalization-timeout" ||
+    reason === "latency-ready-timeout"
   ) {
     return "error";
   }
@@ -154,12 +162,18 @@ export default function Room({ params }: Route.ComponentProps) {
   const [other, setOther] = useState<PeerInfo | null>(null);
   const [connectionType, setConnectionType] = useState<ConnectionType>("UNKNOWN");
   const [otherProfile, setOtherProfile] = useState<ReceivedPeerProfile | null>(null);
+  const [liveLatency, setLiveLatency] = useState<LiveLatency | null>(null);
+  // undefined: the latency sub-phase hasn't finalized yet; null: it finalized
+  // but no usable aggregate came out of it (< 3 samples).
+  const [latencyBaseline, setLatencyBaseline] = useState<Aggregate | null | undefined>(undefined);
 
   const wsRef = useRef<WebSocket | null>(null);
   const webrtcRef = useRef<WebrtcConnection | null>(null);
+  const latencySessionRef = useRef<LatencySession | null>(null);
   const runIdRef = useRef<string | null>(null);
   const selfRef = useRef<PeerInfo | null>(null);
   const otherSlotRef = useRef<Slot | null>(null);
+  const phaseRef = useRef<Phase>("waiting");
   const terminalRef = useRef(false);
   const initialSentRef = useRef(false);
   const initialReceivedRef = useRef(false);
@@ -172,6 +186,15 @@ export default function Room({ params }: Route.ComponentProps) {
     // this binding carries the non-null type into every nested function
     // below without a cast at each call site.
     const profile: ConfirmedProfile = confirmedProfile;
+
+    // The websocket message handler's closures are set up once per effect
+    // run, so plain `phase` state (which doesn't retrigger this effect)
+    // would read stale — `updatePhase` keeps a ref in sync for the run-ended
+    // and channel-close handlers below to check against.
+    function updatePhase(next: Phase) {
+      phaseRef.current = next;
+      setPhase(next);
+    }
 
     function enterTerminal(reason: string) {
       if (terminalRef.current) return;
@@ -220,10 +243,16 @@ export default function Room({ params }: Route.ComponentProps) {
     }
 
     function maybeProfileExchangeComplete() {
-      if (initialSentRef.current && initialReceivedRef.current && profileTimeoutRef.current) {
+      if (!(initialSentRef.current && initialReceivedRef.current)) return;
+      if (profileTimeoutRef.current) {
         clearTimeout(profileTimeoutRef.current);
         profileTimeoutRef.current = null;
       }
+      // The other half of the testing-barrier gate (03-latency §"Starting"):
+      // this side may send `channel-ready` once its own initial profile is
+      // sent and the peer's has validated. Sampling itself waits on the
+      // peer's `channel-ready` in return.
+      latencySessionRef.current?.sendChannelReady();
     }
 
     // getStats()-backed and must never take the initial profile send down
@@ -242,6 +271,38 @@ export default function Room({ params }: Route.ComponentProps) {
     async function handleChannelOpen(label: ChannelLabel, channel: RTCDataChannel) {
       if (label !== "control" || !selfRef.current || !runIdRef.current) return;
       const runId = runIdRef.current;
+
+      // Created synchronously, before any `await` below, so it always
+      // exists by the time `maybeProfileExchangeComplete` might call
+      // `sendChannelReady` on it — that can happen either later in this
+      // same function or from `handleChannelMessage` once the peer's
+      // initial profile validates, and both run after this handler starts.
+      if (!latencySessionRef.current) {
+        latencySessionRef.current = new LatencySession({
+          runId,
+          send: (raw) => channel.send(raw),
+          callbacks: {
+            onSamplingStarted: () => updatePhase("testing"),
+            onLive: setLiveLatency,
+            onHandoff: (handoff) => {
+              if (handoff.kind === "ready") {
+                setLatencyBaseline(handoff.baseline);
+                return;
+              }
+              // "control-closed" and "run-ended" are always paired with an
+              // external event that already calls `enterTerminal` itself
+              // (see the `run-ended` and `handleChannelClose` handlers
+              // below) — calling it again here would be a harmless no-op
+              // at best, but would win the race with a more specific
+              // reason at worst. Only the peer-ready timeout has no other
+              // trigger site.
+              if (handoff.reason === "latency-ready-timeout") {
+                enterTerminal("latency-ready-timeout");
+              }
+            },
+          },
+        });
+      }
 
       const address = await safeGetOwnAddress();
       if (terminalRef.current || runIdRef.current !== runId) return;
@@ -283,7 +344,15 @@ export default function Room({ params }: Route.ComponentProps) {
 
     function handleChannelMessage(label: ChannelLabel, event: MessageEvent) {
       if (label !== "control" || !runIdRef.current || otherSlotRef.current === null) return;
-      const payload = decodeProfileEnvelope(event.data, runIdRef.current);
+      const runId = runIdRef.current;
+
+      const latencyMsg = decodeLatencyMessage(event.data, runId);
+      if (latencyMsg) {
+        latencySessionRef.current?.handleMessage(latencyMsg);
+        return;
+      }
+
+      const payload = decodeProfileEnvelope(event.data, runId);
       if (payload === null) return;
 
       if (!initialReceivedRef.current) {
@@ -302,6 +371,13 @@ export default function Room({ params }: Route.ComponentProps) {
 
     function handleChannelClose(label: ChannelLabel) {
       if (label !== "control") return;
+      // Post-start (03-latency §3.2): freeze whatever samples already
+      // arrived before `abortPreMeasurement` tears anything down. Its own
+      // `enterTerminal("channel-closed")` still wins the visible reason —
+      // see the `onHandoff` comment above.
+      if (phaseRef.current === "testing") {
+        latencySessionRef.current?.freezeForTerminal("control-closed");
+      }
       abortPreMeasurement("channel-closed");
     }
 
@@ -339,7 +415,7 @@ export default function Room({ params }: Route.ComponentProps) {
             break;
           case "run-started": {
             runIdRef.current = envelope.runId;
-            setPhase("pairing");
+            updatePhase("pairing");
             const otherPeer = envelope.payload.peers.find(
               (p) => p.slot !== selfRef.current?.slot,
             );
@@ -364,7 +440,7 @@ export default function Room({ params }: Route.ComponentProps) {
               send: sendEnvelope,
               callbacks: {
                 onConnectionStateChange: (state) => {
-                  if (state === "connected") setPhase("paired");
+                  if (state === "connected") updatePhase("paired");
                 },
                 onConnectionTypeChange: setConnectionType,
                 onFailure: abortPreMeasurement,
@@ -376,10 +452,16 @@ export default function Room({ params }: Route.ComponentProps) {
             break;
           }
           case "run-ended": {
-            // Phase 2 never reaches the testing barrier, so this always
-            // takes the "before testing" row of the terminal handoff: tear
-            // down immediately, no record exists yet to freeze. Phase 4
-            // adds the freeze-and-finalize row for a post-start trigger.
+            // Post-start (03-latency §3.2): freeze whatever samples already
+            // arrived before tearing anything down, so a `FAILED`
+            // partial-record attempt has real data to work with even
+            // though no throughput edge exists yet (Phase 4). Before the
+            // testing barrier resolves this is a no-op — no result
+            // boundary was crossed, and Phase 2's pre-measurement path
+            // writes nothing regardless.
+            if (phaseRef.current === "testing") {
+              latencySessionRef.current?.freezeForTerminal("run-ended");
+            }
             webrtcRef.current?.teardown();
             enterTerminal(envelope.payload.reason);
             break;
@@ -401,6 +483,7 @@ export default function Room({ params }: Route.ComponentProps) {
     return () => {
       clearTimeout(timer);
       if (profileTimeoutRef.current) clearTimeout(profileTimeoutRef.current);
+      latencySessionRef.current?.reset();
       webrtcRef.current?.teardown();
       ws?.close();
     };
@@ -515,13 +598,14 @@ export default function Room({ params }: Route.ComponentProps) {
           </>
         ) : (
           <>
-            {connectionType !== "UNKNOWN" || phase === "paired" ? (
+            {connectionType !== "UNKNOWN" || phase === "paired" || phase === "testing" ? (
               <ConnectionBadge type={connectionType} />
             ) : null}
             <p className="text-gray-700 dark:text-gray-200">
               {phase === "waiting" && (other ? "Peer joined!" : "Waiting for a peer…")}
               {phase === "pairing" && "Connecting to peer…"}
               {phase === "paired" && "Paired!"}
+              {phase === "testing" && "Measuring latency…"}
             </p>
             {self && (
               <p className="text-xs text-gray-500 dark:text-gray-400">
@@ -537,6 +621,32 @@ export default function Room({ params }: Route.ComponentProps) {
                   Waiting for the other peer to introduce themselves…
                 </p>
               )
+            )}
+            {phase === "testing" && (
+              <div className="flex flex-col items-center gap-1">
+                {latencyBaseline === undefined ? (
+                  liveLatency ? (
+                    <p className="text-sm text-gray-700 dark:text-gray-200">
+                      RTT {liveLatency.rttMs.toFixed(0)} ms
+                      {liveLatency.jitterMs !== null &&
+                        ` · jitter ${liveLatency.jitterMs.toFixed(1)} ms`}
+                    </p>
+                  ) : (
+                    <p className="text-xs text-gray-500 dark:text-gray-400">
+                      Measuring…
+                    </p>
+                  )
+                ) : latencyBaseline === null ? (
+                  <p className="text-xs text-gray-500 dark:text-gray-400">
+                    Couldn't measure latency.
+                  </p>
+                ) : (
+                  <p className="text-sm text-gray-700 dark:text-gray-200">
+                    RTT {latencyBaseline.rttMs.toFixed(0)} ms · jitter{" "}
+                    {latencyBaseline.jitterMs.toFixed(1)} ms
+                  </p>
+                )}
+              </div>
             )}
           </>
         )}
