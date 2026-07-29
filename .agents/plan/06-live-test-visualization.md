@@ -769,46 +769,11 @@ product complete until the 6.6 evidence log is filled.
 
 ### Review State
 
-- **Status: CHANGES REQUESTED**
-
-### Findings
-
-- **[P1] Visualization load/render failures are not isolated at the room
-  integration boundary.** The planned fallback covers renderer creation,
-  asset loading, and WebGL context loss, but a rejected client-only dynamic
-  import or an exception from the dashboard subtree can still reach the
-  route boundary and replace the numeric metrics, status, and Cancel action.
-  That violates the presentation-only and failure-isolation requirements.
-- **[P2] The Natural Earth source link does not match the planned mask
-  input.** The plan specifies 1:110m land polygons, but the cited Cultural
-  Vectors page contains administrative data; the land polygons are under
-  Natural Earth's 1:110m Physical Vectors/Land dataset. Following the current
-  reference would make regeneration ambiguous.
-
-### Required Updates
-
-1. Define a component-local error boundary/caught loader around the optional
-   visualization subtree so chunk-load and render exceptions preserve the
-   semantic metric panel, status, and Cancel flow. Add tests for a rejected
-   dynamic import and a thrown visual child, in addition to the existing
-   renderer/context-loss cases.
-2. Replace the Natural Earth cultural-vectors reference with the exact
-   1:110m Physical Vectors/Land source used for the mask, and carry that
-   dataset identity into the planned provenance/regeneration record.
-
-## Re-Review Feedback (Codex, 2026-07-29)
-
-### Review State
-
 - **Status: APPROVED**
 
 ### Assessment
 
-- **P1: Resolved.** The plan now keeps `CoreTestPanel` outside a
-  component-local Suspense/error boundary, routes imperative visual errors
-  into the same enhancement-only fallback, and requires rejected-import and
-  thrown-child tests that prove status, metrics, badge, and Cancel survive.
-- **P2: Resolved.** The source is now the exact Natural Earth 1:110m
-  Physical Vectors — Land dataset (`ne_110m_land`, version 4.0.0), and the
-  provenance record includes the dataset URL, archive identity/checksum,
-  retrieval date, assumptions, and regeneration command.
+- **P1: Resolved.** Visual failures are isolated from the core test UI and
+  controls.
+- **P2: Resolved.** The land mask uses Natural Earth `ne_110m_land` 4.0.0
+  with reproducible provenance.
