@@ -42,15 +42,16 @@ import {
 } from "~/lib/protocol";
 import { slugToToken, tokenToEmojiKey, tokenToSlug } from "~/lib/room-token";
 import { edgeKey, stageName, type StageId } from "~/lib/stage";
-import { parseBulkFrame } from "~/lib/throughput";
 import type { ChannelLabel, ConnectionType } from "~/lib/webrtc";
 import {
   BULK_CONNECTION_COUNT,
+  CHANNELS_PER_BULK_CONNECTION,
   CONTROL_CONN_INDEX,
   WebrtcConnection,
   bulkConnIndex,
   isForceRelayRequested,
 } from "~/lib/webrtc";
+import { BulkWorkerHandle } from "~/lib/worker-bulk";
 
 import type { Route } from "./+types/room";
 
@@ -80,6 +81,10 @@ const PROFILE_TIMEOUT_MS = 20_000;
 // how long this peer keeps transport open after its own local finalization
 // completes, waiting for the DO's `run-ended`, before tearing down anyway.
 const LIFECYCLE_GRACE_MS = 8_000;
+
+// worker-transport revision: every bulk channel across every bulk
+// RTCPeerConnection gets its own dedicated Worker.
+const TOTAL_BULK_WORKERS = BULK_CONNECTION_COUNT * CHANNELS_PER_BULK_CONNECTION;
 
 const TERMINAL_COPY: Record<string, string> = {
   "peer-left": "The other peer disconnected.",
@@ -299,12 +304,12 @@ export default function Room({ params }: Route.ComponentProps) {
 
   // Phase 4 (S5 gate, 4.4)
   const controlChannelRef = useRef<RTCDataChannel | null>(null);
-  // Indexed by bulk connection slot (0..BULK_CONNECTION_COUNT-1, matching
-  // `bulkConnsRef`) — a hole means that connection's channel hasn't opened
-  // yet.
-  const bulkChannelsRef = useRef<(RTCDataChannel | null)[]>(
-    new Array(BULK_CONNECTION_COUNT).fill(null),
-  );
+  // Every bulk channel gets transferred to its own dedicated Worker
+  // (worker-transport revision) in the same task in which it is created.
+  // Handles are stored before initialization completes so effect cleanup
+  // can terminate even a worker whose channel never reaches `open`.
+  const bulkWorkersRef = useRef<BulkWorkerHandle[]>([]);
+  const readyBulkWorkerIdsRef = useRef<Set<number>>(new Set());
   const testConfigRef = useRef<TestConfigPayload | null>(null);
   const latencyHandoffFiredRef = useRef(false);
   const latencyReadyRef = useRef(false);
@@ -503,9 +508,8 @@ export default function Room({ params }: Route.ComponentProps) {
 
     function maybeStartStages() {
       if (stageOrchestratorRef.current) return;
-      const bulkChannels = bulkChannelsRef.current;
       if (
-        bulkChannels.some((c) => c === null) ||
+        readyBulkWorkerIdsRef.current.size < TOTAL_BULK_WORKERS ||
         !testConfigRef.current ||
         !latencyReadyRef.current ||
         !selfRef.current ||
@@ -518,7 +522,7 @@ export default function Room({ params }: Route.ComponentProps) {
         selfSlot: selfRef.current.slot,
         testConfig: testConfigRef.current,
         send: sendControlRaw,
-        bulkChannels: bulkChannels as RTCDataChannel[],
+        workers: bulkWorkersRef.current,
         callbacks: {
           onStageStarted: (stage) => setCurrentStage(stage),
           onProgress: (snapshot) =>
@@ -557,12 +561,37 @@ export default function Room({ params }: Route.ComponentProps) {
       }
     }
 
-    // Each bulk connection's own callback closure already knows its slot
-    // (captured at construction time below), so opening no longer needs to
-    // recover an index from the channel label the way single-connection,
-    // multi-channel-per-connection did.
-    function handleBulkChannelOpen(bulkSlot: number, channel: RTCDataChannel) {
-      bulkChannelsRef.current[bulkSlot] = channel;
+    // This function must reach `handle.init()` synchronously: Chromium only
+    // permits an RTCDataChannel transfer in its creation/datachannel-event
+    // task, before its observer registration task runs. The first `await`
+    // deliberately comes after postMessage has transferred ownership.
+    async function handleBulkChannelCreated(
+      bulkSlot: number,
+      channelIndex: number,
+      channel: RTCDataChannel,
+    ) {
+      if (!runIdRef.current) return;
+      const runId = runIdRef.current;
+      // Worker IDs must be unique across both dimensions. Reusing bulkSlot
+      // for both channels made WorkerBulkStage's ID-keyed maps collapse
+      // eight workers into four and finalize only one channel per pair.
+      const workerId = bulkSlot * CHANNELS_PER_BULK_CONNECTION + channelIndex;
+      let handle: BulkWorkerHandle | null = null;
+      try {
+        handle = new BulkWorkerHandle(workerId);
+        bulkWorkersRef.current.push(handle);
+        await handle.init(runId, channel);
+      } catch (err) {
+        handle?.terminate();
+        console.warn(`bulk worker ${workerId} failed to initialize`, err);
+        handleConnectionFailure("bulk-worker-init-failed");
+        return;
+      }
+      if (terminalRef.current || runIdRef.current !== runId) {
+        handle.terminate();
+        return;
+      }
+      readyBulkWorkerIdsRef.current.add(workerId);
       maybeStartStages();
     }
 
@@ -652,11 +681,10 @@ export default function Room({ params }: Route.ComponentProps) {
     }
 
     function handleChannelMessage(label: ChannelLabel, event: MessageEvent) {
-      if (label === "bulk") {
-        const frame = parseBulkFrame(event.data as ArrayBuffer);
-        if (frame) stageOrchestratorRef.current?.handleBulkFrame(frame);
-        return;
-      }
+      // Bulk channels are transferred to their own Worker in their creation
+      // task (worker-transport revision) — this callback never meaningfully
+      // fires for "bulk", since the main thread no longer holds a live
+      // reference to receive on.
       if (label !== "control" || !runIdRef.current || otherSlotRef.current === null) return;
       const runId = runIdRef.current;
 
@@ -832,9 +860,8 @@ export default function Room({ params }: Route.ComponentProps) {
                 callbacks: {
                   onConnectionTypeChange: recomputeConnectionType,
                   onFailure: handleConnectionFailure,
-                  onChannelOpen: (_label, channel) => handleBulkChannelOpen(bulkSlot, channel),
-                  onChannelMessage: handleChannelMessage,
-                  onChannelClose: handleChannelClose,
+                  onBulkChannelCreated: (channel, channelIndex) =>
+                    void handleBulkChannelCreated(bulkSlot, channelIndex, channel),
                 },
               });
             }
@@ -888,6 +915,14 @@ export default function Room({ params }: Route.ComponentProps) {
       if (lifecycleGraceTimerRef.current) clearTimeout(lifecycleGraceTimerRef.current);
       latencySessionRef.current?.reset();
       stageOrchestratorRef.current?.stop();
+      // Redundant with (and harmless alongside) the orchestrator's own
+      // termination above — this is the fallback for a bulk worker that
+      // finished initializing before pairing failed, when a
+      // `StageOrchestrator` (and its own worker teardown) was never
+      // created at all.
+      for (const worker of bulkWorkersRef.current) worker.terminate();
+      bulkWorkersRef.current = [];
+      readyBulkWorkerIdsRef.current.clear();
       teardownAllConnections();
       ws?.close();
     };

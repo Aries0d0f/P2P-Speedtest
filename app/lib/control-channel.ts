@@ -16,13 +16,8 @@
 
 import { aggregateSamples, type Aggregate, type Sample } from "./latency";
 import type { TestConfigPayload } from "./protocol";
-import {
-  BulkReceiver,
-  BulkSender,
-  RAMP_UP_MS,
-  type BulkChannel,
-  type BulkFrame,
-} from "./throughput";
+import { RAMP_UP_MS } from "./throughput";
+import { WorkerBulkStage, type BulkWorkerPort } from "./worker-bulk";
 import {
   DOWNLOAD,
   DUPLEX,
@@ -332,17 +327,17 @@ export interface StageOrchestratorOptions {
   testConfig: TestConfigPayload;
   /** Writes one already-serialized message to the reliable control channel. */
   send: (raw: string) => void;
-  /** Every parallel bulk channel (04-throughput revision) — fanned out to
-   * for sending; frames arriving on any of them are handed to
-   * `handleBulkFrame` the same way regardless of which one delivered them. */
-  bulkChannels: BulkChannel[];
+  /** Every bulk Worker handle (worker-transport revision) — each owns one
+   * transferred bulk channel and runs its own sender/receiver loop off the
+   * main thread. `StageOrchestrator` owns their lifecycle from here:
+   * driven per stage via `WorkerBulkStage`, terminated in `stop()`. */
+  workers: BulkWorkerPort[];
   callbacks?: StageOrchestratorCallbacks;
 }
 
 interface StageState {
   stageId: StageId;
-  sender: BulkSender | null;
-  receiver: BulkReceiver | null;
+  transport: WorkerBulkStage | null;
   neededKeys: string[];
   localArmedSent: boolean;
   peerArmed: boolean;
@@ -372,7 +367,7 @@ export class StageOrchestrator {
   private readonly selfSlot: Slot;
   private readonly testConfig: TestConfigPayload;
   private readonly sendRaw: (raw: string) => void;
-  private readonly bulkChannels: BulkChannel[];
+  private readonly workers: BulkWorkerPort[];
   private readonly callbacks: StageOrchestratorCallbacks;
 
   private stage: StageState | null = null;
@@ -391,7 +386,7 @@ export class StageOrchestrator {
     this.selfSlot = opts.selfSlot;
     this.testConfig = opts.testConfig;
     this.sendRaw = opts.send;
-    this.bulkChannels = opts.bulkChannels;
+    this.workers = opts.workers;
     this.callbacks = opts.callbacks ?? {};
   }
 
@@ -428,10 +423,6 @@ export class StageOrchestrator {
     }
   }
 
-  handleBulkFrame(frame: BulkFrame): void {
-    this.stage?.receiver?.handleFrame(frame);
-  }
-
   /** Echo a pong for every ping regardless of stage state — mirrors
    * `LatencySession`'s unconditional echo (3.2), now for the continuous
    * loop that runs the whole testing phase rather than just the idle
@@ -459,13 +450,18 @@ export class StageOrchestrator {
     return this.getBank();
   }
 
+  /** Idempotent full teardown: stops the ping loop, disposes the current
+   * stage's transport listeners, and terminates every bulk Worker — which
+   * also closes its transferred channel, since only the worker still holds
+   * a live reference to it. Measurement is over for good once this runs;
+   * workers are never reused after. */
   stop(): void {
     if (this.stopped) return;
     this.stopped = true;
     this.stopPingLoop();
     this.clearStageTimeout();
-    this.stage?.sender?.stop();
-    this.stage?.receiver?.stop();
+    this.stage?.transport?.dispose();
+    for (const worker of this.workers) worker.terminate();
   }
 
   // --- transport barrier: stage-prepare / stage-armed / stage-start ------
@@ -512,7 +508,7 @@ export class StageOrchestrator {
     if (!s || s.stageId !== stageId || s.started) return;
     s.started = true;
     this.currentLatencySamples = []; // this stage's own window starts now
-    s.sender?.start();
+    s.transport?.startSending();
     this.callbacks.onStageStarted?.(stageId);
   }
 
@@ -530,16 +526,17 @@ export class StageOrchestrator {
     if (!s || s.stageId !== stageId) return;
     s.localReceiveWindowClosed = true;
     this.maybeSendLocalStageComplete();
-    this.attemptSealAndSendResult(stageId);
+    void this.attemptSealAndSendResult(stageId);
   }
 
   private maybeSendLocalStageComplete(): void {
     const s = this.stage;
     if (!s || s.localStageCompleteSent || !s.localSendDone || !s.localReceiveWindowClosed) return;
     s.localStageCompleteSent = true;
-    const payload: { sentMeasuredChunks?: number } = s.sender
-      ? { sentMeasuredChunks: s.sender.sentMeasuredChunks }
-      : {};
+    const payload: { sentMeasuredChunks?: number } =
+      isSender(s.stageId, this.selfSlot) && s.transport
+        ? { sentMeasuredChunks: s.transport.sentMeasuredChunks }
+        : {};
     this.sendRaw(
       JSON.stringify({ runId: this.runId, type: "stage-complete", stageId: s.stageId, payload }),
     );
@@ -552,26 +549,33 @@ export class StageOrchestrator {
     s.remoteStageCompleteReceived = true;
     if (sentMeasuredChunks !== undefined) {
       s.remoteSentMeasuredChunks = sentMeasuredChunks;
-      this.attemptSealAndSendResult(stageId);
+      void this.attemptSealAndSendResult(stageId);
     }
     if (this.selfSlot === 0) this.maybeAdvanceStage();
   }
 
   // --- bank barrier: stage-result / stage-result-ack ---------------------
 
-  private attemptSealAndSendResult(stageId: StageId): void {
+  /** Async because sealing now means a postMessage round trip to every
+   * receiver worker (`WorkerBulkStage.finalizeReceiver`), not a synchronous
+   * local computation — callers fire-and-forget this with `void`. Re-checks
+   * `this.stage` after the `await` gap in case the run moved on (a stage
+   * timeout, an abort) while the round trip was in flight. */
+  private async attemptSealAndSendResult(stageId: StageId): Promise<void> {
     const s = this.stage;
     if (
       !s ||
       s.stageId !== stageId ||
-      !s.receiver ||
+      !isReceiver(stageId, this.selfSlot) ||
+      !s.transport ||
       s.localResultSent ||
       !s.localReceiveWindowClosed ||
       s.remoteSentMeasuredChunks === undefined
     ) {
       return;
     }
-    const sealed = s.receiver.finalize(s.remoteSentMeasuredChunks);
+    const sealed = await s.transport.finalizeReceiver(s.remoteSentMeasuredChunks);
+    if (this.stage !== s || s.stageId !== stageId || s.localResultSent) return; // stale after the await
     if (!sealed) return; // no usable total -> no edge; the stage timeout covers this
     const latency = this.currentLatencyAggregate();
     if (!latency) {
@@ -581,7 +585,7 @@ export class StageOrchestrator {
       // this edge unsendable outright; the stage timeout is still the
       // backstop if samples genuinely never come (e.g. the control channel
       // itself is in trouble).
-      setTimeout(() => this.attemptSealAndSendResult(stageId), PING_CADENCE_MS);
+      setTimeout(() => void this.attemptSealAndSendResult(stageId), PING_CADENCE_MS);
       return;
     }
 
@@ -684,31 +688,33 @@ export class StageOrchestrator {
 
   private initStage(stageId: StageId): void {
     this.clearStageTimeout();
+    // Detach the previous stage's listeners before building the next —
+    // `BulkWorkerHandle`s are long-lived across all three stages, unlike
+    // the transport objects wrapping them, so nothing else does this.
+    this.stage?.transport?.dispose();
+
     const senderRole = isSender(stageId, this.selfSlot);
     const receiverRole = isReceiver(stageId, this.selfSlot);
 
-    const sender = senderRole
-      ? new BulkSender({
-          channels: this.bulkChannels,
-          runId: this.runId,
-          stageId,
-          chunkBytes: this.testConfig.chunkBytes,
-          maxDurationMs: this.testConfig.maxDurationMs,
-          maxBytes: this.testConfig.maxBytes,
-          onComplete: (n) => this.onLocalSendComplete(stageId, n),
-        })
-      : null;
-
-    const receiver = receiverRole
-      ? new BulkReceiver({
-          runId: this.runId,
-          stageId,
-          maxDurationMs: this.testConfig.maxDurationMs,
-          onProgress: (snap) => this.onLocalProgress(stageId, snap),
-          onWindowClosed: () => this.onLocalReceiveClosed(stageId),
-        })
-      : null;
-    receiver?.arm();
+    const transport = new WorkerBulkStage({
+      workers: this.workers,
+      runId: this.runId,
+      stageId,
+      senderConfig: senderRole
+        ? {
+            chunkBytes: this.testConfig.chunkBytes,
+            maxDurationMs: this.testConfig.maxDurationMs,
+            maxBytes: this.testConfig.maxBytes,
+            rampUpMs: RAMP_UP_MS,
+          }
+        : null,
+      receiverConfig: receiverRole
+        ? { maxDurationMs: this.testConfig.maxDurationMs, rampUpMs: RAMP_UP_MS }
+        : null,
+      onSenderComplete: (n) => this.onLocalSendComplete(stageId, n),
+      onProgress: (snap) => this.onLocalProgress(stageId, snap),
+      onWindowClosed: () => this.onLocalReceiveClosed(stageId),
+    });
 
     const neededKeys =
       stageId === DUPLEX
@@ -717,8 +723,7 @@ export class StageOrchestrator {
 
     this.stage = {
       stageId,
-      sender,
-      receiver,
+      transport,
       neededKeys,
       localArmedSent: false,
       peerArmed: false,

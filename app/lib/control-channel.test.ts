@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { BulkWorkerCore, type BulkWorkerChannel } from "./bulk-worker-core";
 import { decodeLatencyMessage } from "./latency";
-import { parseBulkFrame, type BulkChannel } from "./throughput";
 import {
   StageOrchestrator,
   TerminalController,
@@ -10,6 +10,8 @@ import {
   type TerminalPeerInfo,
 } from "./control-channel";
 import type { StageBankEntry } from "./stage";
+import type { BulkWorkerPort } from "./worker-bulk";
+import type { MainToWorkerMessage, WorkerToMainMessage } from "./worker-bulk-protocol";
 
 const RUN_ID = "11111111-2222-4333-8444-555555555555";
 
@@ -161,15 +163,17 @@ describe("decodeStageMessage", () => {
 
 // --- Two-peer integration harness -------------------------------------
 
-class RelayChannel implements BulkChannel {
+class RelayChannel implements BulkWorkerChannel {
   bufferedAmount = 0;
   bufferedAmountLowThreshold = 0;
-  onFrame: ((data: ArrayBuffer) => void) | null = null;
+  binaryType = "arraybuffer";
+  onmessage: ((event: MessageEvent) => void) | null = null;
+  peer: RelayChannel | null = null;
   private listeners: Array<() => void> = [];
 
   send(data: ArrayBuffer): void {
     this.bufferedAmount += data.byteLength;
-    this.onFrame?.(data);
+    this.peer?.onmessage?.({ data } as MessageEvent);
   }
   addEventListener(_type: "bufferedamountlow", listener: () => void): void {
     this.listeners.push(listener);
@@ -180,6 +184,38 @@ class RelayChannel implements BulkChannel {
   drain(): void {
     this.bufferedAmount = 0;
     for (const l of [...this.listeners]) l();
+  }
+  close(): void {}
+}
+
+class InProcessBulkWorker implements BulkWorkerPort {
+  readonly workerId: number;
+  private readonly core: BulkWorkerCore;
+  private readonly listeners = new Set<(msg: WorkerToMainMessage) => void>();
+
+  constructor(workerId: number, channel: RelayChannel) {
+    this.workerId = workerId;
+    this.core = new BulkWorkerCore({
+      runId: RUN_ID,
+      workerId,
+      channel,
+      post: (msg) => {
+        for (const listener of this.listeners) listener(msg);
+      },
+    });
+  }
+
+  onMessage(listener: (msg: WorkerToMainMessage) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  send(msg: MainToWorkerMessage): void {
+    this.core.handle(msg);
+  }
+
+  terminate(): void {
+    this.core.handle({ type: "close" });
   }
 }
 
@@ -199,11 +235,14 @@ function linkControl(
   };
 }
 
-function advance(channels: RelayChannel[], totalMs: number, stepMs = 50): void {
+async function advance(channels: RelayChannel[], totalMs: number, stepMs = 50): Promise<void> {
   const steps = Math.ceil(totalMs / stepMs);
   for (let i = 0; i < steps; i++) {
-    vi.advanceTimersByTime(stepMs);
+    await vi.advanceTimersByTimeAsync(stepMs);
     for (const c of channels) c.drain();
+    // WorkerBulkStage's receiver sealing crosses a Promise.all boundary;
+    // let that continuation route its stage-result before the next tick.
+    await Promise.resolve();
   }
 }
 
@@ -219,6 +258,8 @@ describe("StageOrchestrator (two linked peers)", () => {
   function setup(testConfig = { maxDurationMs: 300, maxBytes: 20_000, chunkBytes: 1000 }) {
     const bulkA = Array.from({ length: TEST_BULK_CHANNEL_COUNT }, () => new RelayChannel());
     const bulkB = Array.from({ length: TEST_BULK_CHANNEL_COUNT }, () => new RelayChannel());
+    const workersA = bulkA.map((channel, workerId) => new InProcessBulkWorker(workerId, channel));
+    const workersB = bulkB.map((channel, workerId) => new InProcessBulkWorker(workerId, channel));
 
     let orchA!: StageOrchestrator;
     let orchB!: StageOrchestrator;
@@ -235,7 +276,7 @@ describe("StageOrchestrator (two linked peers)", () => {
       selfSlot: 0,
       testConfig,
       send: linkControl(RUN_ID, () => orchB),
-      bulkChannels: bulkA,
+      workers: workersA,
       callbacks: {
         onEdgeBanked: (e) => bankedA.push(e),
         onStagesDone: () => (doneA = true),
@@ -247,7 +288,7 @@ describe("StageOrchestrator (two linked peers)", () => {
       selfSlot: 1,
       testConfig,
       send: linkControl(RUN_ID, () => orchA),
-      bulkChannels: bulkB,
+      workers: workersB,
       callbacks: {
         onEdgeBanked: (e) => bankedB.push(e),
         onStagesDone: () => (doneB = true),
@@ -255,10 +296,12 @@ describe("StageOrchestrator (two linked peers)", () => {
       },
     });
 
-    // Same-index channels are wired to each other, matching how webrtc.ts
-    // pairs "bulk-N" on one side with "bulk-N" on the other.
-    bulkA.forEach((c) => (c.onFrame = (data) => orchB.handleBulkFrame(parseBulkFrame(data)!)));
-    bulkB.forEach((c) => (c.onFrame = (data) => orchA.handleBulkFrame(parseBulkFrame(data)!)));
+    // Same-index transferred channels are peers, matching how WebRTC pairs
+    // each locally created bulk-N with the remote datachannel event.
+    bulkA.forEach((channel, i) => {
+      channel.peer = bulkB[i];
+      bulkB[i].peer = channel;
+    });
 
     return {
       orchA,
@@ -282,13 +325,13 @@ describe("StageOrchestrator (two linked peers)", () => {
     };
   }
 
-  it("runs download, upload, and duplex to completion with a symmetric 4-edge bank on both peers", () => {
+  it("runs download, upload, and duplex to completion with a symmetric 4-edge bank on both peers", async () => {
     vi.setSystemTime(0);
     const t = setup();
     t.orchA.start();
     t.orchB.start();
 
-    advance([...t.bulkA, ...t.bulkB], 15_000, 200);
+    await advance([...t.bulkA, ...t.bulkB], 15_000, 200);
 
     expect(t.doneA).toBe(true);
     expect(t.doneB).toBe(true);
@@ -308,12 +351,12 @@ describe("StageOrchestrator (two linked peers)", () => {
     }
   });
 
-  it("stage roles follow slot number: download is banked under receiverSlot 1, upload under 0", () => {
+  it("stage roles follow slot number: download is banked under receiverSlot 1, upload under 0", async () => {
     vi.setSystemTime(0);
     const t = setup();
     t.orchA.start();
     t.orchB.start();
-    advance([...t.bulkA, ...t.bulkB], 15_000, 200);
+    await advance([...t.bulkA, ...t.bulkB], 15_000, 200);
 
     const download = t.orchA.getBank().find((e) => e.stageId === 0)!;
     const upload = t.orchA.getBank().find((e) => e.stageId === 1)!;
@@ -321,12 +364,12 @@ describe("StageOrchestrator (two linked peers)", () => {
     expect(upload.receiverSlot).toBe(0);
   });
 
-  it("banked edges are byte-identical between both peers for the same key", () => {
+  it("banked edges are byte-identical between both peers for the same key", async () => {
     vi.setSystemTime(0);
     const t = setup();
     t.orchA.start();
     t.orchB.start();
-    advance([...t.bulkA, ...t.bulkB], 15_000, 200);
+    await advance([...t.bulkA, ...t.bulkB], 15_000, 200);
 
     for (const entry of t.orchA.getBank()) {
       const match = t.orchB
@@ -336,10 +379,11 @@ describe("StageOrchestrator (two linked peers)", () => {
     }
   });
 
-  it("times out and never fires onStagesDone if the peer's stage-armed never arrives", () => {
+  it("times out and never fires onStagesDone if the peer's stage-armed never arrives", async () => {
     vi.setSystemTime(0);
     const testConfig = { maxDurationMs: 300, maxBytes: 20_000, chunkBytes: 1000 };
     const bulkA = new RelayChannel();
+    const workerA = new InProcessBulkWorker(0, bulkA);
     let timeoutA = false;
     let doneA = false;
     const orchA = new StageOrchestrator({
@@ -347,12 +391,12 @@ describe("StageOrchestrator (two linked peers)", () => {
       selfSlot: 0,
       testConfig,
       send: () => {}, // every outbound message from A vanishes — no peer ever responds
-      bulkChannels: [bulkA],
+      workers: [workerA],
       callbacks: { onTimeout: () => (timeoutA = true), onStagesDone: () => (doneA = true) },
     });
 
     orchA.start(); // sends stage-prepare into the void, then waits for stage-armed forever
-    advance([bulkA], 20_000, 200);
+    await advance([bulkA], 20_000, 200);
 
     expect(doneA).toBe(false);
     expect(timeoutA).toBe(true);

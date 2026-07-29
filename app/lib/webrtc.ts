@@ -1,8 +1,8 @@
 /**
  * RTCPeerConnection wrapper (2.2, 2.3; multi-connection revision — see
  * 04-throughput-measurement.md "Revision: parallel RTCPeerConnections").
- * Each instance owns exactly **one** `RTCPeerConnection` and **one** data
- * channel (its offer/answer negotiation, ICE candidate exchange, relay
+ * Each instance owns exactly **one** `RTCPeerConnection` and one or more
+ * data channels (its offer/answer negotiation, ICE candidate exchange, relay
  * classification, and the stopProducing()/teardown() pair that the room's
  * terminal handoff (2.4) drives without reaching inside measurement
  * modules).
@@ -31,9 +31,17 @@ export type ConnectionType = "DIRECT" | "RELAY" | "UNKNOWN";
 export type ChannelLabel = "control" | "bulk";
 export type ConnectionRole = ChannelLabel;
 
-/** How many parallel bulk `RTCPeerConnection`s (04-throughput revision) —
- * one data channel each, run alongside the one control connection. */
+/** How many parallel bulk `RTCPeerConnection`s (04-throughput revision)
+ * run alongside the one control connection. */
 export const BULK_CONNECTION_COUNT = 4;
+
+/** How many data channels each bulk connection carries (worker-transport
+ * revision): each one is transferred to its own dedicated Worker, so a
+ * bulk connection's `CHANNELS_PER_BULK_CONNECTION` channels get genuine
+ * OS-thread-level concurrent send/receive loops, not just independent
+ * backpressure loops sharing the main thread. The control connection
+ * always carries exactly one `control` channel regardless of this value. */
+export const CHANNELS_PER_BULK_CONNECTION = 2;
 
 /** `connIndex` values: 0 is always the control connection; bulk
  * connections take 1..`BULK_CONNECTION_COUNT`. Exported so room.tsx and
@@ -46,6 +54,12 @@ export function bulkConnIndex(bulkSlot: number): number {
 export interface WebrtcCallbacks {
   onConnectionStateChange?: (state: RTCPeerConnectionState) => void;
   onConnectionTypeChange?: (type: ConnectionType) => void;
+  /** Fires synchronously in the channel's creation task, before Chromium
+   * registers its main-thread observer and makes the channel ineligible
+   * for transfer. Bulk callers must transfer ownership from this callback;
+   * waiting for `open` is already too late. `channelIndex` is local to this
+   * connection and stable in creation/datachannel-event order. */
+  onBulkChannelCreated?: (channel: RTCDataChannel, channelIndex: number) => void;
   onChannelOpen?: (label: ChannelLabel, channel: RTCDataChannel) => void;
   onChannelMessage?: (label: ChannelLabel, event: MessageEvent) => void;
   onChannelClose?: (label: ChannelLabel) => void;
@@ -62,8 +76,8 @@ export interface WebrtcOptions {
    * stamped on every outgoing offer/answer/ice-candidate so the peer can
    * route it back to the matching instance on their side. */
   connIndex: number;
-  /** Which single channel this connection carries: reliable/ordered
-   * `control`, or unordered/non-retransmitting `bulk`. */
+  /** Which kind of channel this connection carries: one reliable/ordered
+   * `control`, or several unordered/non-retransmitting `bulk` channels. */
   role: ConnectionRole;
   iceServers: RTCIceServer[];
   send: (envelope: Envelope) => void;
@@ -158,7 +172,9 @@ export class WebrtcConnection {
 
   private readonly connIndex: number;
   private readonly role: ConnectionRole;
-  private channel: RTCDataChannel | null = null;
+  // `control` role only ever populates one entry; `bulk` role populates up
+  // to `CHANNELS_PER_BULK_CONNECTION`.
+  private readonly channels: RTCDataChannel[] = [];
 
   private producing = true;
   private torndown = false;
@@ -227,22 +243,27 @@ export class WebrtcConnection {
     };
 
     if (this.slot === 0) {
-      // The channel is created here, before the first (and only) offer: a
-      // channel added post-connect triggers renegotiation, and there is no
-      // renegotiation flow in this design.
-      this.wireChannel(
-        this.role === "control"
-          ? this.pc.createDataChannel("control", { ordered: true })
-          : this.pc.createDataChannel("bulk", { ordered: false, maxRetransmits: 0 }),
-      );
+      // Every channel is created here, before the first (and only) offer:
+      // a channel added post-connect triggers renegotiation, and there is
+      // no renegotiation flow in this design.
+      if (this.role === "control") {
+        this.wireChannel(this.pc.createDataChannel("control", { ordered: true }));
+      } else {
+        for (let i = 0; i < CHANNELS_PER_BULK_CONNECTION; i++) {
+          this.wireChannel(
+            this.pc.createDataChannel(`bulk-${i}`, { ordered: false, maxRetransmits: 0 }),
+          );
+        }
+      }
       void this.startAsOfferer();
     }
   }
 
-  /** This connection's one channel — `control` or `bulk` depending on
-   * `role`. `null` until it opens. */
-  getChannel(): RTCDataChannel | null {
-    return this.channel;
+  /** This connection's channel(s), in creation/datachannel-event order —
+   * always one for `control` role, up to
+   * `CHANNELS_PER_BULK_CONNECTION` for `bulk`. */
+  getChannels(): RTCDataChannel[] {
+    return this.channels;
   }
 
   getConnectionType(): ConnectionType {
@@ -307,17 +328,23 @@ export class WebrtcConnection {
   }
 
   /** Closes the peer connection and channels and clears transport queues.
-   * Idempotent: safe to call from multiple simultaneous terminal triggers. */
+   * Idempotent: safe to call from multiple simultaneous terminal triggers.
+   * A bulk channel transferred to a Worker is neutered on the main thread
+   * by that point — `.close()` on it is a harmless no-op/throw either way
+   * (caught below); the worker closes its own real reference instead, via
+   * a separate `"close"` message (`worker-bulk.ts`'s `BulkWorkerHandle`). */
   teardown(): void {
     if (this.torndown) return;
     this.torndown = true;
     this.producing = false;
     this.pendingCandidates = [];
     this.clearFailureConfirmTimer();
-    try {
-      this.channel?.close();
-    } catch {
-      // already closed
+    for (const channel of this.channels) {
+      try {
+        channel.close();
+      } catch {
+        // already closed, or neutered by a Worker transfer
+      }
     }
     try {
       this.pc.close();
@@ -411,8 +438,18 @@ export class WebrtcConnection {
   }
 
   private wireChannel(channel: RTCDataChannel): void {
-    if (this.role === "bulk") channel.binaryType = "arraybuffer";
-    this.channel = channel;
+    const channelIndex = this.channels.length;
+    this.channels.push(channel);
+
+    if (this.role === "bulk") {
+      // Transfer must happen in this same task. In Chromium the channel
+      // stops being transferable once its observer is registered on a
+      // queued task, which is before `open`; the worker becomes the sole
+      // owner and installs all bulk-channel event handlers from here.
+      this.callbacks.onBulkChannelCreated?.(channel, channelIndex);
+      return;
+    }
+
     const label = this.role;
     channel.onopen = () => this.callbacks.onChannelOpen?.(label, channel);
     channel.onmessage = (event) => this.callbacks.onChannelMessage?.(label, event);
