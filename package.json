@@ -10,7 +10,12 @@
 		"preview": "bun run build && vite preview",
 		"cf-typegen": "wrangler types",
 		"migration:schema": "schemas/upload.sh",
-		"postinstall": "wrangler types",
+		"generate:schema": "node scripts/build-schema.mjs",
+		"postinstall": "wrangler types && bun run generate:schema",
+		"predev": "bun run generate:schema",
+		"prebuild": "bun run generate:schema",
+		"pretest": "bun run generate:schema",
+		"pretypecheck": "bun run generate:schema",
 		"postdeploy": "bun run migration:schema",
 		"test": "vitest run"
 	},

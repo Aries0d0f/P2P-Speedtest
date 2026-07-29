@@ -253,6 +253,7 @@ $defs:
     then:
       properties:
         bandwidth:
+          type: object
           required:
             - directional
             - duplex
