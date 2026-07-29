@@ -130,7 +130,7 @@ describe("BulkSender", () => {
     const channel = new FakeChannel();
     let completedWith: number | undefined;
     const sender = new BulkSender({
-      channel,
+      channels: [channel],
       runId: RUN_ID,
       stageId: 0,
       chunkBytes: 100,
@@ -183,7 +183,7 @@ describe("BulkSender", () => {
     vi.setSystemTime(RAMP_UP_MS); // skip ramp-up for this test
     const channel = new FakeChannel();
     const sender = new BulkSender({
-      channel,
+      channels: [channel],
       runId: RUN_ID,
       stageId: 0,
       chunkBytes: 1000,
@@ -207,7 +207,7 @@ describe("BulkSender", () => {
     vi.setSystemTime(0);
     const channel = new FakeChannel();
     const sender = new BulkSender({
-      channel,
+      channels: [channel],
       runId: RUN_ID,
       stageId: 0,
       chunkBytes: 100,
