@@ -142,9 +142,10 @@ export default function Home() {
             <input
               type="text"
               value={joinInput}
-              onChange={(e) => setJoinInput(e.target.value)}
+              onChange={(e) => setJoinInput(e.target.value.toUpperCase())}
               placeholder="Room ID, emoji key, or link"
               className="rounded-lg border border-gray-300 px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+              autoCapitalize="characters"
             />
             <button
               type="submit"
