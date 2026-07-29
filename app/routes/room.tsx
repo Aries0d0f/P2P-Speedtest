@@ -19,6 +19,22 @@ interface EchoEntry {
 }
 
 /**
+ * A random, per-tab, per-room nonce persisted in sessionStorage. It exists
+ * only so a refresh of this exact tab reconnects into the same slot instead
+ * of racing its own about-to-close socket and pairing with itself; it is
+ * never shared with the other peer and never restores any application
+ * state (S3 still issues a fresh peerId on every accept).
+ */
+function getTabSessionId(slug: string): string {
+  const key = `p2p-speedtest:room-session:${slug}`;
+  const existing = sessionStorage.getItem(key);
+  if (existing) return existing;
+  const created = crypto.randomUUID();
+  sessionStorage.setItem(key, created);
+  return created;
+}
+
+/**
  * Deliberately throwaway: this exists to verify the signaling backbone by
  * hand. Phase 2 replaces the indicator with the real waiting/pairing/
  * testing state machine; Phase 5 does the visual work.
@@ -43,59 +59,74 @@ export default function Room({ params }: Route.ComponentProps) {
 
   useEffect(() => {
     if (token === null) return;
-    const slug = tokenToSlug(token);
-    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const ws = new WebSocket(`${proto}//${window.location.host}/api/room/${slug}`);
-    wsRef.current = ws;
 
-    ws.addEventListener("open", () => setStatus("open"));
-    ws.addEventListener("close", () => setStatus("closed"));
-    ws.addEventListener("error", () => setStatus("error"));
-    ws.addEventListener("message", (event) => {
-      const envelope: Envelope = JSON.parse(event.data as string);
-      switch (envelope.type) {
-        case "peer-assigned":
-          selfRef.current = envelope.payload;
-          setSelf(envelope.payload);
-          break;
-        case "peer-joined":
-          setOther(envelope.payload);
-          break;
-        case "run-started": {
-          runIdRef.current = envelope.runId;
-          setRunId(envelope.runId);
-          const otherPeer = envelope.payload.peers.find(
-            (p) => p.slot !== selfRef.current?.slot,
-          );
-          if (otherPeer) setOther(otherPeer);
-          break;
+    // StrictMode double-invokes effects in development: setup, cleanup,
+    // then setup again, synchronously. Deferring the actual connection to
+    // a macrotask means that synthetic first cleanup runs before it ever
+    // opens, so only the real mount ever performs a socket connect —
+    // avoiding a wasted signaling round-trip on every dev page load.
+    let ws: WebSocket | null = null;
+    const timer = setTimeout(() => {
+      const slug = tokenToSlug(token);
+      const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+      const session = getTabSessionId(slug);
+      ws = new WebSocket(
+        `${proto}//${window.location.host}/api/room/${slug}?session=${session}`,
+      );
+      wsRef.current = ws;
+
+      ws.addEventListener("open", () => setStatus("open"));
+      ws.addEventListener("close", () => setStatus("closed"));
+      ws.addEventListener("error", () => setStatus("error"));
+      ws.addEventListener("message", (event) => {
+        const envelope: Envelope = JSON.parse(event.data as string);
+        switch (envelope.type) {
+          case "peer-assigned":
+            selfRef.current = envelope.payload;
+            setSelf(envelope.payload);
+            break;
+          case "peer-joined":
+            setOther(envelope.payload);
+            break;
+          case "run-started": {
+            runIdRef.current = envelope.runId;
+            setRunId(envelope.runId);
+            const otherPeer = envelope.payload.peers.find(
+              (p) => p.slot !== selfRef.current?.slot,
+            );
+            if (otherPeer) setOther(otherPeer);
+            break;
+          }
+          case "run-ended":
+            runIdRef.current = null;
+            setRunId(null);
+            setEndedReason(envelope.payload.reason);
+            break;
+          case "ping":
+            ws?.send(
+              JSON.stringify({
+                type: "pong",
+                runId: envelope.runId,
+                payload: {},
+              }),
+            );
+            break;
+          case "ice-candidate":
+            setLog((l) => [
+              ...l,
+              { direction: "received", text: String(envelope.payload) },
+            ]);
+            break;
+          default:
+            break;
         }
-        case "run-ended":
-          runIdRef.current = null;
-          setRunId(null);
-          setEndedReason(envelope.payload.reason);
-          break;
-        case "ping":
-          ws.send(
-            JSON.stringify({
-              type: "pong",
-              runId: envelope.runId,
-              payload: {},
-            }),
-          );
-          break;
-        case "ice-candidate":
-          setLog((l) => [
-            ...l,
-            { direction: "received", text: String(envelope.payload) },
-          ]);
-          break;
-        default:
-          break;
-      }
-    });
+      });
+    }, 0);
 
-    return () => ws.close();
+    return () => {
+      clearTimeout(timer);
+      ws?.close();
+    };
   }, [token]);
 
   if (token === null) {

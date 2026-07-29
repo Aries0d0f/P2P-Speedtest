@@ -28,9 +28,12 @@ function getStub(name: string) {
 
 async function connect(
   stub: ReturnType<typeof getStub>,
-  opts?: { autoPong?: boolean },
+  opts?: { autoPong?: boolean; sessionId?: string },
 ) {
-  const resp = await stub.fetch("http://do/room", {
+  const url = opts?.sessionId
+    ? `http://do/room?session=${opts.sessionId}`
+    : "http://do/room";
+  const resp = await stub.fetch(url, {
     headers: { Upgrade: "websocket" },
   });
   if (resp.status !== 101 || !resp.webSocket) {
@@ -182,6 +185,54 @@ describe("connection and peer assignment", () => {
     expect(b.messages.find((m) => m.type === "ice-candidate")?.payload).toBe(
       "hello from a",
     );
+  });
+});
+
+describe("same-tab reconnect (refresh) does not pair with itself", () => {
+  it("reclaims its own slot instead of taking the other one, even if the old socket is still technically attached", async () => {
+    const stub = getStub("room-refresh-1");
+    await stub.claim("room-refresh-1");
+
+    const first = await connect(stub, { sessionId: "tab-A" });
+    await waitFor(() => first.messages.some((m) => m.type === "peer-assigned"));
+    expect(
+      first.messages.find((m) => m.type === "peer-assigned")?.payload.slot,
+    ).toBe(0);
+
+    // Simulate a refresh: the new socket opens with the SAME session id
+    // before the old one (`first`) has been closed or detected as gone.
+    const refreshed = await connect(stub, { sessionId: "tab-A" });
+    await waitFor(() =>
+      refreshed.messages.some((m) => m.type === "peer-assigned"),
+    );
+    const reassigned = refreshed.messages.find((m) => m.type === "peer-assigned");
+    expect(reassigned?.payload.slot).toBe(0); // same slot, not slot 1
+    expect(reassigned?.payload.peerId).not.toBe(
+      first.messages.find((m) => m.type === "peer-assigned")?.payload.peerId,
+    );
+
+    // No run-started should ever have fired — there was never a second peer.
+    expect(refreshed.messages.some((m) => m.type === "run-started")).toBe(false);
+
+    // A genuinely different tab still gets slot 1 normally.
+    const guest = await connect(stub, { sessionId: "tab-B" });
+    await waitFor(() => guest.messages.some((m) => m.type === "run-started"));
+    expect(
+      guest.messages.find((m) => m.type === "peer-assigned")?.payload.slot,
+    ).toBe(1);
+  });
+
+  it("does not affect a genuinely different second peer connecting without a session id", async () => {
+    const stub = getStub("room-refresh-2");
+    await stub.claim("room-refresh-2");
+
+    const a = await connect(stub, { sessionId: "tab-A" });
+    await waitFor(() => a.messages.some((m) => m.type === "peer-assigned"));
+    const b = await connect(stub); // no session id at all
+    await waitFor(() => b.messages.some((m) => m.type === "run-started"));
+
+    expect(a.messages.find((m) => m.type === "peer-assigned")?.payload.slot).toBe(0);
+    expect(b.messages.find((m) => m.type === "peer-assigned")?.payload.slot).toBe(1);
   });
 });
 
