@@ -65,10 +65,34 @@ These were discussed and fixed with the user; later plans must follow them.
   by a user directly — it's carried by the join methods in decision 3.
 - Each of the two peers opens a WebSocket to `/api/room/:roomToken` (routed
   to the DO via `idFromName`).
-- The DO's only job: track up to 2 connected peer slots per room (see the
+- The DO's job: track up to 2 connected peer slots per room (see the
   explicit join/eviction rule below), relay messages between them verbatim
   (SDP offer, SDP answer, ICE candidates, and later a "ready"/"start test"
-  handshake), and enforce that cap.
+  handshake), enforce that cap, **and** — per the data-model amendment
+  below — assign each connecting peer's `peer-id` at connect time and, once
+  both peers report their post-test measurements, finalize and hash-sign
+  the canonical result record. See "Amendment (2026-07-29, #2)" for the
+  full result-finalization flow; it does not change the DO's core
+  signaling-relay role, it adds one more message-relay/compute
+  responsibility on top of it.
+- **Peer ID assignment**: at WebSocket accept time, alongside slot
+  assignment, the DO reads the **server-observed** `CF-Connecting-IP`
+  (never a client-reported IP — not spoofable) and computes
+  `peer-id = uuidv5(P2P_SPEEDTEST_NAMESPACE, "ip:<CF-Connecting-IP>|room:<roomToken>")`,
+  where `P2P_SPEEDTEST_NAMESPACE` is the fixed constant
+  `7c522f7b-5c9f-5c64-8084-b4b10587c272` (itself
+  `uuidv5(NAMESPACE_URL, "https://sws.aries0d0f.me/p2p-speedtest")`,
+  computed once and hardcoded — never recomputed at runtime). This exact
+  algorithm is the schema's canonical `peer-id` definition
+  (`schemas/p2p-speedtest-result.v1.schema.yaml`) — not a placeholder.
+- **Peer slot record**: the DO stores `{slot, peerId, ip, protocol}` for
+  each connected peer at accept time — `ip` is the same
+  `CF-Connecting-IP` used above, `protocol` is derived from its format
+  (`IPv4`/`IPv6`). This is the **authoritative and only** source for
+  `data.peers[].ip`/`protocol` in the result schema — it does not depend
+  on the client-side geo lookup (decision 3/amendment #2) succeeding,
+  since that lookup is explicitly allowed to fail and only ever supplies
+  the optional `geo` sub-object.
 - **Peer slot lifecycle & 3rd-join rule** (resolves the reject-vs-evict
   conflict from the first review pass): each connecting peer is assigned a
   slot (0 or 1) and a per-connection peer ID at WebSocket accept time. A
@@ -111,14 +135,25 @@ obvious to both users whether the test ran over a direct path or a relay.
 - **Relay detection**: after the ICE connection reaches `connected`, both
   peers inspect `RTCPeerConnection.getStats()` for the currently selected
   candidate pair and read `localCandidateType` / `remoteCandidateType`. If
-  either side is `relay`, the session is classified as **relayed**;
-  otherwise (`host`/`srflx` on both sides) it's **direct**.
-- **Disclosure mechanism**: the connection-type (`direct` | `relayed`) is
-  surfaced as a persistent, non-dismissable badge in the room UI the moment
-  it's known (before the test even starts), and is embedded as a field on
-  the results object itself (`connection.type`), shown again on the results
-  screen and included in any copied/shared result text — so a relayed
-  result can never be mistaken for a direct one, even out of context.
+  either side is `relay`, the session is classified as **`RELAY`**;
+  otherwise (`host`/`srflx` on both sides) it's **`DIRECT`**. These are
+  two of the three values of the result schema's `data.via` field
+  (`schemas/p2p-speedtest-result.v1.schema.yaml`) — the third, `UNKNOWN`, is
+  the DO's fallback when the test never reached ICE classification at all
+  (e.g. a pre-`paired` failure/cancellation), not a value either peer ever
+  classifies locally. Each peer reports its own `DIRECT`/`RELAY`
+  classification to the DO as part of its measurement report (data-model
+  amendment below); the DO's canonical `via` is `RELAY` if any peer
+  reported `RELAY`, `DIRECT` if at least one report arrived and none was
+  `RELAY`, else `UNKNOWN`.
+- **Disclosure mechanism**: the connection type (`DIRECT` | `RELAY`) is
+  surfaced as a persistent, non-dismissable badge in the room UI the
+  moment it's known locally (before the test even starts, from each
+  peer's own `getStats()` read — not waiting on the DO round-trip), and is
+  embedded as the `data.via` field on the finalized results object, shown
+  again on the results screen and included in any copied/shared result
+  text — so a relayed result can never be mistaken for a direct one, even
+  out of context.
 - If TURN itself is unreachable/fails, fall back to STUN-only behavior
   (connection may simply fail on hard NATs) — TURN is an enhancement to
   reachability, not a hard dependency of the signaling path.
@@ -208,6 +243,13 @@ WebSockets in `workers/app.ts`":
   receiver in that phase). Duplex/simultaneous measurement is out of scope
   for MVP (adds complexity in attributing available bandwidth per direction
   on asymmetric links) — may be revisited later.
+- **Result shape** (data-model amendment below): the two phases' measured
+  throughput are not stored as "download"/"upload" — they're stored as two
+  directional `bandwidth` edges keyed by `peer-id` (`{from, to, speed,
+  latency, jitter}`, per `schemas/p2p-speedtest-result.v1.schema.yaml`),
+  since the schema models bandwidth as a peer-to-peer graph, not a
+  session-relative label. `speed` is in bits per second (not Mbps) in the
+  stored record; UI layers convert for display.
 - Packet loss can be derived cheaply from the unreliable channel (sequence
   numbers in each chunk) as a bonus metric, not a required one.
 
@@ -245,7 +287,9 @@ failure-prone part of the app) free of unrelated concerns.
       second peer's signaling connection (decision 1).
     - `pairing` — second peer has connected over the signaling WebSocket;
       SDP/ICE exchange and `RTCPeerConnection` establishment in progress
-      (decision 2).
+      (decision 2); each peer also performs its client-side geo self-lookup
+      here (data-model amendment below) and reports `{ip, protocol, geo}`
+      to the DO, in parallel with connection establishment.
     - `paired` — ICE connected; the direct-vs-relayed badge (decision 2) is
       now known and shown; both peers see a "ready to test" state (possibly
       with a manual or auto-start trigger — exact trigger is a Phase 2/3
@@ -253,25 +297,36 @@ failure-prone part of the app) free of unrelated concerns.
     - `testing` — latency (Phase 3) then throughput download/upload
       (Phase 4) phases run in sequence, with live numbers shown to both
       peers as they're measured.
-    - `result` — final numbers (latency, download, upload, connection type)
-      are shown in-place on the room page immediately after the test
-      completes, *and* the same result record is written to `localStorage`
-      (decision 7) so it also shows up later on the results page. The room
-      page's result view is the "just finished, both peers looking at it
-      together" view; the results page (below) is the durable history.
+    - `finalizing` — brief sub-state after both throughput phases complete
+      (or after a failure/cancellation): each peer sends its measurement
+      report to the DO and waits for the DO's `result-ready` message
+      (data-model amendment below) carrying the canonical, hash-signed
+      result. This is normally sub-second; a timeout here without a
+      `result-ready` response falls into the same error sub-state pattern
+      as other `testing` failures.
+    - `result` — the finalized record (from `finalizing`) is shown in-place
+      on the room page, *and* each peer writes its own `metadata`-wrapped
+      copy to `localStorage` (decision 7) so it also shows up later on the
+      results page. The room page's result view is the "just finished,
+      both peers looking at it together" view; the results page (below) is
+      the durable history. This state is reached for all three `status`
+      values (`SUCCESSED`/`FAILED`/`CANCELED`), not success only.
   - Connection-state errors (peer disconnected mid-test, ICE/TURN failure)
-    are handled as sub-states of `pairing`/`testing`, not separate routes.
+    are handled as sub-states of `pairing`/`testing`, not separate routes;
+    they transition through `finalizing` into `result` with
+    `status: FAILED` or `CANCELED` rather than being a dead end.
 - **Results page — `/results` (local history, detail view, import/export)**
   - Reads exclusively from `localStorage` (decision 7) — no network calls,
     no room/DO interaction. Works standalone even if no test was ever run
     in this browser (empty state).
-  - **List view** (default): every stored result as a row/card — timestamp,
-    download/upload/latency summary, connection type (direct/relayed)
-    badge. Sorted newest first.
-  - **Detail view**: selecting an entry (e.g. `/results/:id`, `id` being
-    the result's locally-generated identifier) shows its full record —
-    same fields as the room page's post-test summary, so nothing is lost
-    by navigating away from the room page.
+  - **List view** (default): every stored result as a row/card —
+    `data.timestamp`, bandwidth summary derived from `data.bandwidth`,
+    `data.via` (`DIRECT`/`RELAY`) badge, `data.status`
+    (`SUCCESSED`/`FAILED`/`CANCELED`) indicator. Sorted newest first.
+  - **Detail view**: selecting an entry (`/results/:room/:peerId` — see
+    decision 7's amendment; there is no locally-generated id) shows its
+    full record — same fields as the room page's post-test summary, so
+    nothing is lost by navigating away from the room page.
   - **Import/export**: an "Export" action serializes the stored results
     (all, or a selection) to a downloadable JSON file; an "Import" action
     reads a previously-exported JSON file and merges its entries into
@@ -285,35 +340,70 @@ failure-prone part of the app) free of unrelated concerns.
 
 ### 7. Local results persistence & import/export
 
+**Superseded 2026-07-29 by the data-model amendment below** — the record
+shape is no longer defined inline here. The canonical, machine-validated
+definition lives in `schemas/p2p-speedtest-result.v1.schema.yaml`
+(`kind: P2PSpeedtestResult`, `apiVersion: sws.aries0d0f.me/v1`), with a
+worked example in `schemas/p2p-speedtest-result.example.yaml`. This
+section now only covers the storage/write/import mechanics around that
+schema, which are unchanged in spirit from the original decision.
+
 - **Storage**: results are stored in the browser's `localStorage` under a
   single namespaced key (e.g. `p2p-speedtest:results`) as a JSON array of
-  result records. `localStorage` (not `IndexedDB`) is sufficient given the
-  expected record count and size (a handful of numeric fields per test) —
+  `P2PSpeedtestResult` records (the full envelope — `apiVersion`, `kind`,
+  `metadata`, `data` — not just the `data` payload). `localStorage` (not
+  `IndexedDB`) is sufficient given the expected record count and size —
   revisit only if real usage shows otherwise.
-- **Record shape** (fixed by this decision so Phase 4/5 and the results
-  page agree on one schema from the start):
-  - `id` — locally generated unique identifier (e.g. `crypto.randomUUID()`).
-  - `completedAt` — ISO timestamp of test completion.
-  - `connection.type` — `"direct" | "relayed"` (decision 2).
-  - `latency` — `{ rttMs, jitterMs }`.
-  - `download` / `upload` — `{ mbps }` (and any secondary metrics from
-    decision 5, e.g. packet loss, once implemented).
-  - `roomSlug` — the Room ID the test ran in, for reference only (the room
-    itself is long gone by the time this is read back).
-  - A `schemaVersion` field from day one, so future field changes can be
-    migrated on read instead of silently breaking old imported files.
-- **Write path**: the room page writes exactly one record per completed
-  test, at the moment the `result` state (decision 6) is reached — written
-  once, never mutated afterward.
-- **Import merge rule**: importing a JSON export merges by `id` — entries
-  whose `id` already exists locally are skipped (first-write-wins; imports
-  never overwrite existing local history), everything else is appended.
-  Malformed entries (failing schema/shape validation) are skipped
+- **Record shape**: exactly `schemas/p2p-speedtest-result.v1.schema.yaml`.
+  Notably:
+  - `metadata.id` is the room ID (dup of `data.room`); `metadata.peer-id`
+    is *this browser's* peer id (differs between the two peers' stored
+    copies of the same test); `metadata.hash` is the DO-computed integrity
+    hash over `data` (see "Amendment (2026-07-29, #2)" below) — both
+    peers' `metadata.hash` values are identical since `data` itself is
+    identical.
+  - `data.status` is one of `SUCCESSED | FAILED | CANCELED` — all three
+    are persisted (not success-only); `data.peers`/`data.bandwidth` may
+    have fewer than 2 entries for non-`SUCCESSED` records, per the
+    schema's conditional length rule.
+  - There is no separate `schemaVersion` field — `apiVersion` fills that
+    role (a future breaking change ships as `sws.aries0d0f.me/v2`, and
+    readers branch on it the same way a `schemaVersion` bump would have
+    been handled).
+- **Write path**: each peer writes exactly one `P2PSpeedtestResult` record
+  per finalized (completed, failed, or canceled) test, at the moment the
+  `result` state (decision 6) is reached, using the DO-finalized `data` +
+  `metadata.hash` it received from `result-ready` — never assembled or
+  hashed client-side. **If the DO never finalizes** (crash, signaling drop
+  before `result-ready`), **no record is written** — there is no
+  locally-synthesized fallback; the room page shows a non-persisted error
+  state instead (Phase 4 scope). Written once, never mutated afterward,
+  guarded against duplicate writes from re-renders/reconnects
+  (implementation detail, not fixed here — the relevant phase plan owns
+  it).
+- **Import merge rule**: importing a JSON export merges by
+  `metadata.peer-id` + `data.room` (the combination that's actually unique
+  per stored record, since two peers' records for the same test share
+  `data.room` but differ in `metadata.peer-id`) — entries that already
+  exist locally under that combination are skipped (first-write-wins;
+  imports never overwrite existing local history), everything else is
+  appended. Malformed entries (failing schema validation, including
+  `apiVersion`/`kind` mismatches, **or a `metadata.hash` that doesn't
+  match a recomputed hash over the entry's own `data`**) are skipped
   individually with a visible warning, not a fatal import error for the
-  whole file.
-- **Export format**: the exported JSON is exactly `{ schemaVersion, results:
-  [...] }` — the same shape read back on import — so export-then-import
-  round-trips losslessly and files are portable between browsers.
+  whole file. Hash recomputation uses the same canonical-serialization
+  algorithm the DO uses to compute it in the first place
+  (`app/lib/result-hash.ts`, shared code) — this is what makes the hash a
+  real integrity check on import, not just a schema-shaped field.
+- **Results detail route**: `/results/:room/:peerId` (decision 6,
+  amendment #2 point 4) — not `/results/:id`, since there is no locally
+  generated id.
+- **Export format**: the exported JSON is exactly `{ results: [...] }`
+  where each entry is a full `P2PSpeedtestResult` envelope (no separate
+  top-level `schemaVersion` wrapper, since each record already carries its
+  own `apiVersion`) — the same shape read back on import — so
+  export-then-import round-trips losslessly and files are portable
+  between browsers.
 - No size cap is enforced in the MVP beyond `localStorage`'s own browser
   quota; if that becomes a real constraint, a follow-up can add a
   max-entries eviction policy (oldest-first).
@@ -357,23 +447,27 @@ metrics approach before tackling throughput.
 
 ### Phase 4 — Throughput measurement (download + upload) + result persistence
 Unreliable bulk data channel(s), chunked send loop with backpressure
-handling, phase sequencing (download then upload, roles swapped), live
-Mbps display, final results view shown to both peers on the room page
-(decision 6 `result` state), with connection type (direct/relayed) attached
-to and displayed alongside the results. On reaching `result`, each peer
-writes its result record to `localStorage` per the schema and write path in
-decision 7 — this is the point the results page (Phase 5) starts having
-data to show.
+handling, phase sequencing (download then upload, roles swapped per the
+canonical slot mapping), live Mbps display. Each peer reports its own
+measured edge, latency, and `via` classification to the DO; the DO
+finalizes and hash-signs the canonical `P2PSpeedtestResult.data`
+(`schemas/p2p-speedtest-result.v1.schema.yaml`, amendment #2) and relays it
+back to both peers via the room page's `finalizing` → `result` states
+(decision 6). Each peer writes its own `metadata`-wrapped copy of that
+identical `data`/`hash` to `localStorage` — this is the point the results
+page (Phase 5) starts having data to show. Covers all three `data.status`
+outcomes (`SUCCESSED`/`FAILED`/`CANCELED`), not success-only.
 
 ### Phase 5 — Results page, polish & robustness
-Build the `/results` page (decision 6): list view, detail view
-(`/results/:id`), and the import/export mechanism (decision 7, incl. the
-merge-by-`id` rule and per-entry import validation). Also: room
-expiry/cleanup edge cases, reconnect/error handling (peer closes tab
-mid-test, ICE/TURN failure messaging), QR code and copy-to-clipboard UI
-refinement, responsive layout across all three pages, basic result sharing
-from both the room page and results page (copy results text/link,
-including connection type in the copied output).
+Build the `/results` page (decision 6): list view, detail view, and the
+import/export mechanism (decision 7, incl. the merge-by-`metadata.peer-id`
++`data.room` rule and per-entry `apiVersion` validation against the
+schema). Also: room expiry/cleanup edge cases, reconnect/error handling
+(peer closes tab mid-test, ICE/TURN failure messaging — routed through
+`finalizing` into a `FAILED` result, not a dead end), QR code and
+copy-to-clipboard UI refinement, responsive layout across all three pages,
+basic result sharing from both the room page and results page (copy
+results text/link, including `data.via` in the copied output).
 
 ### Phase 6 — Stretch: beyond MVP
 Ideas explicitly out of scope for Phases 1-5, to revisit afterward:
@@ -438,22 +532,28 @@ policy for `localStorage` if quota becomes a real constraint.
       room.
 - [ ] Two browsers on different networks can establish a WebRTC connection,
       falling back to TURN relay when a direct path isn't available.
-- [ ] The connection-type badge (direct vs relayed) is accurate and visible
-      before and after the test, and appears in the results data/summary.
+- [ ] The connection-type badge (`DIRECT` vs `RELAY`) is accurate and
+      visible before and after the test, and appears as `data.via` in the
+      results data/summary.
 - [ ] Latency (RTT) is measured and displayed live.
-- [ ] Download and upload throughput are each measured and displayed, with a
-      final results summary visible to both peers.
+- [ ] Bandwidth is measured in both directions and displayed, with a final
+      results summary visible to both peers, sourced from the DO's
+      `result-ready` payload and identical (same `hash`) across both
+      peers' stored copies.
 - [ ] Room state is cleaned up (DO alarm) after peers disconnect or go idle;
       a stale peer slot can be replaced by a 3rd joiner, but a live peer
       never gets evicted just because someone else has the join info.
 - [ ] The home page (`/`), room page (`/room/:slug`), and results page
-      (`/results`, `/results/:id`) exist as the three top-level routes per
+      (`/results`, `/results/:room/:peerId`) exist as the three top-level routes per
       decision 6, each scoped to its own responsibility.
-- [ ] Completed results are written to `localStorage` per the decision 7
-      schema and are visible on the results page's list and detail views.
+- [ ] Completed, failed, and canceled tests are all written to
+      `localStorage` as `P2PSpeedtestResult` records validating against
+      `schemas/p2p-speedtest-result.v1.schema.yaml`, and are visible on the
+      results page's list and detail views.
 - [ ] Results can be exported to a JSON file and re-imported (including
       into a different/empty browser storage) without data loss or
-      duplication, per the decision 7 merge rule.
+      duplication, per the decision 7 merge rule (`metadata.peer-id` +
+      `data.room`).
 - [ ] `SignalingRoom` is exported, bound, and migrated in `wrangler.jsonc`;
       `/api/room/*` requests are dispatched correctly alongside normal
       React Router routes (`/room/:slug` still renders the app).
@@ -512,7 +612,7 @@ out of MVP scope and can be picked up in any order afterward.
 Added decision 6 (Pages / routes) defining the three top-level pages —
 home (`/`, branding + create/join), room (`/room/:slug`, all speedtest
 logic and its `waiting → pairing → paired → testing → result` states), and
-results (`/results`, `/results/:id`, local history + detail + import/
+results (`/results`, `/results/:room/:peerId`, local history + detail + import/
 export) — and decision 7 (local results persistence & import/export)
 specifying the `localStorage` schema, write path, and import merge rule.
 This elevates what was previously listed under Phase 6 as a stretch goal
@@ -536,3 +636,202 @@ unaffected. This amendment has not yet been through a Codex re-review pass.
 ### Follow-Up For Claude (Phase 5 Plan)
 1. Specify that `/results` and `/results/:id` read `localStorage` only on the client side, with an SSR-safe initial/empty state, because this React Router app can render routes server-side where `window.localStorage` is unavailable.
 2. Clarify result sharing semantics for local-only history: copied result text is portable, but any copied `/results/:id` link only resolves in browsers that already have that result in `localStorage` unless the JSON export/import path has been used.
+
+## Amendment (2026-07-29, #2): Server-finalized, hash-signed result schema
+
+The user supplied a concrete data model/API spec for the speedtest result
+as a YAML example. It is now the canonical source of truth for the result
+record, replacing decision 7's inline flat schema. Canonical files:
+
+- `schemas/p2p-speedtest-result.v1.schema.yaml` — JSON Schema (draft 2020-12)
+  for the full `P2PSpeedtestResult` envelope.
+- `schemas/p2p-speedtest-result.example.yaml` — a schema-valid worked
+  example (the user's pasted example had YAML syntax errors — mixed
+  tabs/spaces, misaligned nesting — corrected here without changing any
+  field name, value convention, or the `SUCCESSED` spelling).
+
+This is a structural change, not just a rename. Three points were decided
+in chat (2026-07-29) and are now load-bearing:
+
+1. **The result is finalized server-side, not peer-computed — and ONLY
+   the DO ever produces a persistable record.** Each peer reports its own
+   local measurements (throughput it received, its own latency/jitter
+   finalization from Phase 3, its own `via` classification) to the
+   `SignalingRoom` DO over the existing signaling WebSocket — note
+   `ip`/`protocol` are **not** part of this report (see point 2, revised).
+   Once the DO has both peers' reports (or a failure/cancellation/timeout
+   condition), it assembles the canonical `data` object — using its own
+   accept-time-recorded `{peerId, ip, protocol}` per peer (decision 1) plus
+   whatever `geo` each peer separately reported — validates the
+   application-level invariants a JSON Schema can't express (`data.room`
+   matches the room; `bandwidth[].from`/`to` each reference a known
+   `peers[].id`; when two bandwidth entries exist they're a reverse pair),
+   computes `hash` (SHA-256 hex over a canonical/stable-key JSON
+   serialization of `data` — see `app/lib/result-hash.ts`, a module shared
+   between the DO and the client so both sides use the identical
+   algorithm), and sends a `result-ready` message containing `{data, hash}`
+   back to both peers. Each peer then wraps that identical `(data, hash)`
+   pair in its own `metadata` (`id`, its own `peer-id`, `hash`) and writes
+   the record to `localStorage`.
+   **If `result-ready` never arrives** (DO crash, signaling drop before
+   finalization) — **no record is persisted at all.** There is no
+   locally-synthesized fallback record with a placeholder hash (an earlier
+   draft of this amendment proposed one; Codex correctly flagged that it
+   would contradict "DO-only hash" and undermine import-time integrity
+   checks). The room page instead shows a non-persisted "couldn't finalize
+   the result" error state (Phase 4 scope), with a retry/dismiss action —
+   losing an occasional record to a rare DO/signaling failure is
+   preferable to ever writing a record whose `hash` doesn't actually
+   attest to DO involvement.
+   The DO does not persist `data`/`hash` beyond the relay — it computes
+   and forwards, then the room's normal idle-alarm cleanup (decision 1)
+   still applies. This does **not** violate the "no server-side
+   persistence" requirement: the DO never writes the result anywhere
+   durable, it's a compute-and-relay step over data that already left the
+   peers' hands as small JSON messages (not test traffic, which still
+   never touches Cloudflare's network in the direct case).
+2. **Geo lookup is client-side and best-effort; `ip`/`protocol` are
+   always server-observed, never client-reported (resolves Codex's
+   schema-amendment P1 finding).** During `pairing`, each peer's browser
+   calls `https://ip.aries0d0f.me/?q=geo` (an HTTPS/CORS-safe proxy the
+   user runs in front of ip-api.com — chosen specifically to work around
+   ip-api.com's free tier being HTTP-only and lacking CORS headers, both
+   blockers for a browser-side fetch from an HTTPS page) to look up its
+   own geolocation, then reports **only** `{geo}` to the DO (not
+   `ip`/`protocol` — an earlier draft of this amendment had the client
+   report those too, which Codex correctly flagged as a single point of
+   failure: if the geo proxy is unreachable, the DO would have no
+   schema-required `ip`/`protocol` for that peer). `ip`/`protocol` are
+   populated by the DO exclusively from its own accept-time
+   `CF-Connecting-IP` record (decision 1's "Peer slot record") — this
+   never depends on the geo proxy succeeding. A failed geo lookup means
+   that peer's `data.peers[].geo` is `{}`, nothing else changes. This geo
+   step runs in parallel with ICE negotiation in the `pairing` state
+   (decision 6), not blocking it.
+3. **All three `status` values (`SUCCESSED`, `FAILED`, `CANCELED`) are
+   persisted**, not success-only — but only once the DO actually
+   finalizes one (per the revised point 1: a DO/signaling failure that
+   prevents finalization produces no record, not a `FAILED` one; a
+   `FAILED`/`CANCELED` `status` means the DO *did* finalize, just with an
+   unsuccessful outcome, e.g. a peer disconnected mid-test or the test was
+   explicitly canceled). A room page's `finalizing`/`result` states
+   (decision 6) are reached on failure and cancellation too, not just
+   successful completion. Because a failed/canceled test may never reach
+   a second peer or ever measure anything, the schema's `peers`/
+   `bandwidth` arrays only require exactly 2 items when
+   `status === SUCCESSED`; otherwise they may be shorter. Similarly,
+   `data.via` is `UNKNOWN` (a third enum value added in response to
+   Codex's schema-amendment P1 finding) when the test never reached ICE
+   classification — only `SUCCESSED` records are guaranteed a non-UNKNOWN
+   `via` (see the schema file's `if`/`then` block).
+
+4. **Results detail route key** (resolves Codex's Phase 2/5
+   schema-amendment findings): since a stored record's identity is
+   `metadata.peer-id` + `data.room`, not a locally-generated id, the
+   results detail route is `/results/:room/:peerId` (both segments are
+   URL-path-safe: `room` is the 9-char slug, `peerId` is a standard UUID).
+   `/results/:id` (singular) is retired from decision 6's route list.
+
+### Cross-decision impact summary
+
+- **Decision 1** (signaling): DO gains peer-id assignment (server-observed
+  IP, exact UUIDv5 algorithm now fixed above), an accept-time
+  `{peerId, ip, protocol}` peer-slot record (the sole source of
+  `data.peers[].ip`/`protocol`), and post-test report/finalize/validate/
+  hash/relay responsibility. Still one DO instance per room, still no
+  KV/D1, still alarm-based cleanup. A finalization that never completes
+  produces no record (not a fallback one).
+- **Decision 2** (NAT traversal): `direct`/`relayed` renamed to
+  `DIRECT`/`RELAY`/`UNKNOWN` to match `data.via` exactly; classification
+  logic unchanged for the two known cases, `UNKNOWN` covers pre-ICE
+  failure/cancellation; the DO needs each reporting peer's classification
+  to produce one canonical `via`, and uses `UNKNOWN` when no peer ever
+  reported one.
+- **Decision 3** (pairing): geo lookup (client-side, during `pairing`)
+  supplies only the optional `geo` sub-object; it never supplies
+  `ip`/`protocol`, which come exclusively from decision 1's DO-side
+  peer-slot record.
+- **Decision 5** (measurement methodology): the "download"/"upload" mental
+  model for running the test is unchanged (two sequential phases, roles
+  swapped), but the *stored* result reframes that as two directional
+  `bandwidth` edges keyed by `peer-id`, matching a peer-to-peer graph
+  rather than a session-relative label. Stored `speed` is bits per second,
+  not Mbps.
+- **Decision 6** (pages/routes): room page state machine gains a
+  `finalizing` sub-state between `testing` and `result`, and `result` is
+  now reachable for all three statuses, not success-only (but only once
+  the DO actually finalizes — see point 1's revision). Results detail
+  route is `/results/:room/:peerId`, not `/results/:id`.
+- **Decision 7** (persistence): rewritten above to point at the schema
+  files; write path now consumes the DO's `result-ready` payload instead
+  of assembling the record purely client-side (with no local fallback on
+  timeout); import/export and merge rules updated to the new envelope
+  shape; import now also recomputes and verifies `metadata.hash` against
+  `data` (via the shared `app/lib/result-hash.ts`), not just structural
+  schema validation.
+
+### Impact on existing phase plans
+
+`.agents/plan/phase-1-signaling-backbone.md` through
+`phase-5-results-polish.md` were originally written against the old flat
+decision-7 schema and the peer-computed/idempotent-write design from the
+prior Codex review round. They have now been re-synced to this amendment
+in their schema-amendment revision notes. Historical review sections below
+remain for traceability, but the current phase instructions should follow
+this amendment and the updated phase-plan sections that reference
+`schemas/p2p-speedtest-result.v1.schema.yaml`.
+
+## Review Feedback (Codex, 2026-07-29, schema amendment)
+
+### Review State
+- **Status: CHANGES REQUESTED**
+
+### Findings
+- **[P1] `data.via` is required for `FAILED`/`CANCELED` records even though the amendment says those records may happen before ICE classification exists.** The schema requires `data.via` for every result, and the master success criteria require failed/canceled tests to validate against that schema. But the amendment also says a failed/canceled test may never reach a second peer or ever measure anything. In those cases there may be no selected ICE candidate pair and no meaningful `DIRECT`/`RELAY` value. This blocks implementation because the DO cannot produce a truthful schema-valid record for early failure/cancel paths. Either add an `UNKNOWN`/`UNDETERMINED` enum value, make `via` conditionally required only after pairing/ICE classification exists, or scope persisted failed/canceled records to only failures after `via` is known.
+- **[P1] Required peer `ip`/`protocol` fields are sourced from a client-side geo lookup that can fail.** The amendment says each peer reports `{ip, protocol, geo}` after calling the geo proxy, while the schema requires `peers[].ip` and `peers[].protocol` whenever a peer is included. Phase 2 says geo lookup failure should not block the test, but the master does not define a server-observed fallback for `ip`/`protocol` in `data.peers`. Without that fallback, any failure of `https://ip.aries0d0f.me/?q=geo` leaves the DO unable to include that peer in a schema-valid result. Define that the DO stores authoritative `ip`/`protocol` from `CF-Connecting-IP` at WebSocket accept and uses client geo lookup only to populate the optional `geo` fields.
+- **[P2] The hash/signing contract is internally inconsistent around fallback records.** Decision 7 says records use the DO-finalized `data` plus DO-computed `metadata.hash`, never hashed client-side. Phase 4 now proposes a locally synthesized failed record with a placeholder zero hash if `result-ready` never arrives. That would still match the schema pattern but violates the master contract and undermines import-time integrity checks. Decide whether non-DO fallback records are out-of-scope for persistence, get a real client-computed integrity hash with an explicit `source`/attestation field, or require all persisted records to come from DO finalization only.
+
+### Required Updates
+1. Fix the schema/master contract for `data.via` on pre-ICE `FAILED`/`CANCELED` records.
+2. Make server-observed `ip`/`protocol` the fallback or authority for `data.peers[]`, with client geo lookup supplying optional geo details only.
+3. Remove or redesign local placeholder-hash fallback records so persisted records do not look DO-finalized when they are not.
+
+### Resolution (2026-07-29)
+1. **Resolved**: schema's `data.via` gained a third enum value, `UNKNOWN`,
+   required always but only `SUCCESSED` records are constrained to a
+   non-`UNKNOWN` value (`if`/`then` block). Amendment point 3 updated to
+   match.
+2. **Resolved**: amendment point 2 rewritten — the client's `geo-report`
+   now carries only `{geo}`; `ip`/`protocol` come exclusively from the
+   DO's accept-time `CF-Connecting-IP` record (decision 1's new "Peer slot
+   record" bullet), never from the client. Schema's `peer` def and
+   top-level description updated to state this explicitly.
+3. **Resolved**: the local placeholder-hash fallback is removed entirely.
+   Amendment point 1 now states plainly that a finalization the DO never
+   completes produces no persisted record at all — the room page shows a
+   non-persisted error state instead. `metadata.hash` is therefore always
+   a real DO-computed value when a record exists. Also added: a canonical
+   hash algorithm (`app/lib/result-hash.ts`, shared between DO and
+   client) and a requirement that import re-verifies the hash, not just
+   the schema shape (decision 7, cross-decision impact summary).
+
+Also fixed, beyond the three findings above, since they surfaced while
+resolving them: the `peer-id` UUIDv5 algorithm is now fully concrete (a
+hardcoded namespace constant + exact name-string format, decision 1),
+replacing the earlier "exact concatenation format to be fixed later"
+placeholder Codex separately flagged in Phase 1's schema-amendment review;
+and the results detail route key (`/results/:room/:peerId`) is now settled
+(new amendment point 4), resolving Phase 2/5's coordination finding.
+
+## Re-Review Feedback (Codex, 2026-07-29, schema amendment)
+
+### Review State
+- **Status: APPROVED**
+
+### Assessment
+- **P1**: Resolved. `data.via` now supports `UNKNOWN`, with schema logic requiring non-`UNKNOWN` only for `SUCCESSED` records, so early failed/canceled finalization has a truthful schema-valid value.
+- **P1**: Resolved. Peer `ip`/`protocol` are now authoritative DO-observed fields captured from `CF-Connecting-IP`; client geo lookup supplies only optional `geo`.
+- **P2**: Resolved. Placeholder local fallback records are removed. Persisted records now only come from DO `result-ready`, and import is required to recompute/verify the shared canonical hash.
+
+### Follow-Up For Implementation
+1. Keep `app/lib/result-hash.ts` shared by Worker and browser code; do not fork the canonicalization implementation.
