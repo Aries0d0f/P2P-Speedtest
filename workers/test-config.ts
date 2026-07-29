@@ -7,10 +7,11 @@ import type { TestConfigPayload } from "~/lib/protocol";
  *
  * `chunkBytes` is kept well under any browser's negotiated SCTP
  * max-message-size (04-throughput revision): throughput now comes from
- * `BULK_CHANNEL_COUNT` parallel bulk channels, not from pushing a single
- * message as large as possible, so there's no reason to spend that
- * cross-browser risk (older/mobile Safari in particular has shipped with
- * meaningfully smaller negotiated limits than Chrome/Firefox).
+ * `BULK_CONNECTION_COUNT` parallel `RTCPeerConnection`s (each with its own
+ * bulk channel), not from pushing a single message as large as possible, so
+ * there's no reason to spend that cross-browser risk (older/mobile Safari
+ * in particular has shipped with meaningfully smaller negotiated limits
+ * than Chrome/Firefox).
  *
  * Real service configuration is Phase 4's concern; the setter below exists
  * so tests can change the "current" value between two claims and confirm

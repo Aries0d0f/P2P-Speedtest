@@ -1,12 +1,15 @@
 /**
- * Bulk transfer over the unordered, non-retransmitting `bulk-*` channels
- * (4.1, S5; multi-channel revision — see 04-throughput-measurement.md's
- * "Revision: parallel bulk channels"). `BULK_CHANNEL_COUNT` (webrtc.ts)
- * parallel channels carry every stage in both directions — the frame
+ * Bulk transfer over the unordered, non-retransmitting `bulk` channels
+ * (4.1, S5; multi-connection revision — see 04-throughput-measurement.md's
+ * "Revision: throughput tuning and parallel transport"). `webrtc.ts` gives
+ * this module `BULK_CONNECTION_COUNT` channels, one per parallel
+ * `RTCPeerConnection`, carrying every stage in both directions — the frame
  * header says which stage a chunk belongs to, so a receiver never needs to
- * know which physical channel delivered it, only that all of them share
- * one `runId`/`stageId`/measured-sequence space (each created with
- * `{ ordered: false, maxRetransmits: 0 }`).
+ * know which physical channel (or which underlying connection) delivered
+ * it, only that all of them share one `runId`/`stageId`/measured-sequence
+ * space. This module is transport-topology-agnostic by design: it only
+ * knows the `BulkChannel` interface, never how many connections back the
+ * channels it's given or whether they share one.
  *
  * `control-channel.ts` (4.2) owns the stage-sequencing FSM and everything
  * on the reliable control channel, including `measurement-progress`; this
@@ -127,7 +130,7 @@ export const RAMP_UP_MS = 1500;
 // chunk size) come from server-issued `test-config`, never this.
 //
 // This is an *aggregate* target across every channel, not per channel:
-// with `BULK_CHANNEL_COUNT` potentially large, a fixed per-channel floor
+// with `BULK_CONNECTION_COUNT` potentially large, a fixed per-channel floor
 // would multiply total queued memory by channel count for no benefit —
 // keeping the pipe full doesn't need more total bytes queued just because
 // it's spread over more channels, it needs each channel's own share of
