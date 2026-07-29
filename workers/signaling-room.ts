@@ -9,6 +9,7 @@ import {
   type TestConfigPayload,
 } from "~/lib/protocol";
 import { getCurrentTestConfig } from "./test-config";
+import { mintTurnCredentials } from "./turn-provider";
 
 // Project-wide fixed namespace for peer-id derivation (S3). Any fixed value
 // works: peer ids live and die with a room, so nothing is invalidated if
@@ -16,11 +17,27 @@ import { getCurrentTestConfig } from "./test-config";
 // once rooms depending on it are live.
 const PEER_ID_NAMESPACE = "1d9f4b7a-0e4c-4f7d-9c8e-6a2b7f0e5d31";
 
+// 2.1: static, provider-neutral STUN entries sent alongside whatever TURN
+// credential (if any) was minted for this peer.
+const STATIC_STUN_SERVERS: RTCIceServer[] = [
+  { urls: ["stun:stun.cloudflare.com:3478"] },
+];
+
 interface TimingConfig {
   hardExpiryMs: number;
   idleWindowMs: number;
   heartbeatIntervalMs: number;
   finalizationGraceMs: number;
+  // The TURN provider's credential lifetime is separately capped to the
+  // room's remaining time (`expiresAt - now`) at mint time —
+  // `turnCredentialDefaultTtlMs` is only the other side of that `min()`, an
+  // upper bound with no room-lifecycle knowledge of its own.
+  turnCredentialDefaultTtlMs: number;
+  // Below this much room life left, minting a credential is pointless (some
+  // providers reject a near-zero TTL outright, and even an accepted one
+  // would expire before negotiation finishes). A room this close to its
+  // hard expiry cannot host a test regardless of TURN.
+  turnCredentialFloorMs: number;
 }
 
 let TIMING: TimingConfig = {
@@ -28,6 +45,8 @@ let TIMING: TimingConfig = {
   idleWindowMs: 2 * 60 * 1000,
   heartbeatIntervalMs: 15 * 1000,
   finalizationGraceMs: 5 * 1000,
+  turnCredentialDefaultTtlMs: 60 * 60 * 1000,
+  turnCredentialFloorMs: 60 * 1000,
 };
 
 /** Test-only hook: shrinks the real-time windows above so heartbeat/expiry/
@@ -226,6 +245,19 @@ export class SignalingRoom extends DurableObject<Env> {
       const otherWs = [...occupied.entries()].find(([s]) => s !== slot)?.[1];
       if (otherWs) {
         const otherAttachment = otherWs.deserializeAttachment() as SlotAttachment;
+
+        // 2.1: a run starting with less than the TTL floor remaining could
+        // only mint a credential the provider would reject (or one that
+        // expires before negotiation finishes), and a room this close to
+        // hard expiry cannot host a test regardless. End it as expired
+        // rather than pairing the peers into a room with no runway.
+        const remainingMs = expiresAt - now;
+        if (remainingMs < TIMING.turnCredentialFloorMs) {
+          await this.endRoom("expired", { closeCode: EXPIRED_CLOSE_CODE });
+          await this.cleanupAndDelete();
+          return new Response(null, { status: 101, webSocket: client });
+        }
+
         const newRunId = crypto.randomUUID();
         await this.ctx.storage.put({
           runId: newRunId,
@@ -255,6 +287,16 @@ export class SignalingRoom extends DurableObject<Env> {
           runId: newRunId,
           payload: { peers },
         });
+
+        // Minted per peer rather than shared: providers generally bind a
+        // credential to a single client, and issuing one each avoids a
+        // failure mode that looks like a network problem.
+        const ttlSeconds = Math.floor(
+          Math.min(TIMING.turnCredentialDefaultTtlMs, remainingMs) / 1000,
+        );
+        await Promise.all(
+          [server, otherWs].map((ws) => this.sendIceServers(ws, newRunId, ttlSeconds)),
+        );
       }
 
       await this.scheduleAlarm();
@@ -430,6 +472,33 @@ export class SignalingRoom extends DurableObject<Env> {
     }
 
     await this.scheduleAlarm();
+  }
+
+  /**
+   * Mints one peer's TURN credential and sends it combined with the static
+   * STUN entries. A provider failure (missing secret, non-2xx, network
+   * error — all collapsed to `null` inside `mintTurnCredentials`) must not
+   * block the run: fall back to STUN-only and let the connection attempt
+   * proceed on whatever path it can find.
+   */
+  private async sendIceServers(
+    ws: WebSocket,
+    runId: string,
+    ttlSeconds: number,
+  ): Promise<void> {
+    const turnServer = await mintTurnCredentials(this.env, ttlSeconds);
+    if (!turnServer) {
+      console.warn("TURN credential unavailable; sending STUN-only ICE servers");
+    }
+    this.safeSend(ws, {
+      type: "ice-servers",
+      runId,
+      payload: {
+        iceServers: turnServer
+          ? [...STATIC_STUN_SERVERS, turnServer]
+          : STATIC_STUN_SERVERS,
+      },
+    });
   }
 
   private async relayIfCurrentRun(
