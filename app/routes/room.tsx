@@ -191,11 +191,16 @@ export default function Room({ params }: Route.ComponentProps) {
     // onChannelClose again) and only the first call does anything.
     function abortPreMeasurement(reason: string) {
       if (terminalRef.current) return;
+      console.warn(`abortPreMeasurement: ${reason}`);
       enterTerminal(reason);
       const ws = wsRef.current;
       if (ws && ws.readyState === WebSocket.OPEN) {
         try {
-          ws.close(4401, "pre-measurement-failed");
+          // The specific local `reason` travels in the close reason (well
+          // under the 123-byte limit) so a failure is diagnosable from the
+          // wire/devtools alone, instead of every trigger reading the same
+          // "pre-measurement-failed" regardless of which one actually fired.
+          ws.close(4401, reason);
         } catch {
           // already closing
         }
@@ -220,11 +225,24 @@ export default function Room({ params }: Route.ComponentProps) {
       }
     }
 
+    // getStats()-backed and must never take the initial profile send down
+    // with it: a browser-specific getStats() hiccup (observed on some
+    // mobile Safari versions) must not silently strand the run in
+    // `pairing` for the full profile-timeout window.
+    async function safeGetOwnAddress() {
+      try {
+        return (await webrtcRef.current?.getOwnAddress()) ?? {};
+      } catch (err) {
+        console.warn("getOwnAddress failed; continuing without it", err);
+        return {};
+      }
+    }
+
     async function handleChannelOpen(label: ChannelLabel, channel: RTCDataChannel) {
       if (label !== "control" || !selfRef.current || !runIdRef.current) return;
       const runId = runIdRef.current;
 
-      const address = (await webrtcRef.current?.getOwnAddress()) ?? {};
+      const address = await safeGetOwnAddress();
       if (terminalRef.current || runIdRef.current !== runId) return;
 
       const initial = buildInitialProfileMessage(
@@ -235,27 +253,30 @@ export default function Room({ params }: Route.ComponentProps) {
       );
       try {
         channel.send(encodeProfileEnvelope(runId, initial));
-      } catch {
+      } catch (err) {
+        console.warn("failed to send initial profile", err);
         return;
       }
       initialSentRef.current = true;
       maybeProfileExchangeComplete();
 
-      // Geo enrichment: fire-and-forget, never blocks or re-gates pairing.
-      const geo = await fetchGeo();
-      if (terminalRef.current || runIdRef.current !== runId) return;
-      const freshAddress = (await webrtcRef.current?.getOwnAddress()) ?? address;
-      if (terminalRef.current || runIdRef.current !== runId) return;
-      const enrichment = buildEnrichmentProfileMessage(
-        profile,
-        USER_AGENT,
-        freshAddress,
-        geo,
-      );
+      // Geo enrichment: fire-and-forget, never blocks or re-gates pairing,
+      // and a failure anywhere in this tail must never be mistaken for the
+      // initial send above already having failed.
       try {
+        const geo = await fetchGeo();
+        if (terminalRef.current || runIdRef.current !== runId) return;
+        const freshAddress = await safeGetOwnAddress();
+        if (terminalRef.current || runIdRef.current !== runId) return;
+        const enrichment = buildEnrichmentProfileMessage(
+          profile,
+          USER_AGENT,
+          freshAddress,
+          geo,
+        );
         channel.send(encodeProfileEnvelope(runId, enrichment));
-      } catch {
-        // channel already gone; nothing to enrich
+      } catch (err) {
+        console.warn("profile enrichment failed", err);
       }
     }
 
