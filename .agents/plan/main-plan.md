@@ -180,7 +180,8 @@ Public surfaces:
 
 - A reliable ordered control channel carries coordination, ping/pong,
   profiles, and result exchange.
-- An unordered, non-retransmitting bulk channel carries throughput payloads.
+- One or more unordered, non-retransmitting bulk channels carry throughput
+  payloads.
 - Both peers measure RTT with their own clocks. Jitter is derived from
   consecutive RTT samples.
 - Throughput is receiver-observed, excludes ramp-up, and respects channel

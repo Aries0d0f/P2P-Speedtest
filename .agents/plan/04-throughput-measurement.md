@@ -439,17 +439,23 @@ not running this protocol. That is defensive parsing, not enforcement.
 
 **`app/lib/throughput.ts`** (new)
 
-The `bulk` channel already exists — Phase 2 creates it with the initial
-offer, `{ ordered: false, maxRetransmits: 0 }` (S5). One channel carries
-every stage in both directions; the frame header says which stage a chunk
-belongs to, so a second channel would add negotiation surface for nothing.
-The duplex stage sends both ways over it at once.
+`BULK_CHANNEL_COUNT` parallel `bulk-0..N` channels exist — Phase 2's single
+`bulk` channel was revised post-implementation (see "Revision: parallel bulk
+channels" below) into `webrtc.ts` creating `BULK_CHANNEL_COUNT` of them with
+the initial offer, each `{ ordered: false, maxRetransmits: 0 }` (S5). Every
+stage in both directions shares all of them; the frame header says which
+stage a chunk belongs to and carries a stage-wide measured sequence number,
+so a receiver never needs to know or care which physical channel delivered
+a given frame. The duplex stage sends both ways over the same set at once.
 
 **Send loop:** chunks of `chunkBytes`, running for at most `maxDurationMs` /
-`maxBytes` after a discarded ramp-up, respecting `bufferedAmountLowThreshold`
-and the `bufferedamountlow` event. Those numbers come from `test-config`,
-not from client-side constants. Sensible values for the DO to issue: 16–64 KB
-chunks, 5–10s duration.
+`maxBytes` after a discarded ramp-up, fanned out across every channel and
+respecting each channel's own `bufferedAmountLowThreshold` and
+`bufferedamountlow` event — one shared seq/byte counter, one backpressure
+loop per channel. `maxDurationMs`/`maxBytes`/`chunkBytes` come from
+`test-config`, never a client-side constant; `chunkBytes` in particular is
+kept conservative (see the revision note) now that throughput comes from
+channel parallelism rather than large single messages.
 
 **The frame header is mandatory**, not optional: every chunk carries
 `runId`, `stageId`, `seq`, and the explicit
@@ -727,8 +733,9 @@ individually valid and honestly partial.*
 
 **Stages and transfer**
 
-- [ ] The bulk channel uses `ordered: false, maxRetransmits: 0`, verified in
-      review and via `chrome://webrtc-internals`.
+- [ ] Every bulk channel (`bulk-0..bulk-{N-1}`) uses
+      `ordered: false, maxRetransmits: 0`, verified in review and via
+      `chrome://webrtc-internals`.
 - [ ] All three stages run in order, each with live Mbps, roles swapped
       between the first two, and both peers sending and receiving in the
       third.
@@ -871,3 +878,38 @@ and export are all built on that exact contract.
 - All review findings are resolved. Loss, stage banking, live metrics,
   terminal handling, frame parsing, and transactional persistence are
   executable and covered by acceptance checks.
+
+## Revision: parallel bulk channels (2026-07-30)
+
+Post-implementation LAN testing measured throughput far below what a single
+WebRTC data channel over SCTP should reach (~250 Mbps on a direct 10 Gbps
+link, vs. ~9.4 Gbps from `iperf3` on the same path). Investigation ruled out
+protocol-level bugs — the gap is `RTCDataChannel`'s SCTP-in-userspace
+transport (`usrsctp`), not this app's framing or barriers. Two changes
+followed:
+
+- **`BULK_CHANNEL_COUNT` parallel bulk channels** (`webrtc.ts`), labeled
+  `bulk-0`..`bulk-{N-1}`, replacing the single `bulk` channel this section
+  originally specified. `BulkSender` (4.1) fans its shared seq/byte/phase
+  state across all of them, each with its own backpressure loop; the
+  `bufferedamountlow` event round trip on any *one* channel no longer stalls
+  the whole stream. `BulkReceiver` is unchanged — a frame's channel of
+  origin was never part of its identity, only `(runId, stageId, seq)` is.
+  **Caveat, so this isn't mistaken for N-times parallelism:** every channel
+  on one `RTCPeerConnection` still multiplexes over a single SCTP
+  association (one DTLS/UDP flow, one congestion window) — this is not the
+  same lever as parallel TCP/WebSocket connections, each of which gets an
+  independent congestion window. The realistic gain is keeping the SCTP send
+  queue fuller across independent per-channel backpressure loops, not a
+  multiplied ceiling.
+- **`chunkBytes` lowered** (`workers/test-config.ts`, 64 KB → 16 KB): with
+  throughput now coming from channel parallelism rather than large single
+  messages, there's no reason to keep spending the cross-browser risk of a
+  bigger `chunkBytes` — negotiated SCTP max-message-size has historically
+  been smaller on Safari/WebKit than Chrome/Firefox.
+
+The wire frame header, stage-sequencing FSM, and result schema are all
+unchanged — this is a transport-fan-out change beneath 4.1, invisible to
+4.2's barriers and 4.3/4.4's record. Every "Done when" item and acceptance
+check in this document still applies unmodified; read `bulk` in 4.1's Work
+section as "every bulk channel" wherever it appears above.
