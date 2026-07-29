@@ -51,7 +51,10 @@ export interface RunEndedPayload {
 // Phase 2 payloads. offer/answer/ice-candidate are SDP/ICE data relayed
 // verbatim between peers — the DO never inspects their contents, only
 // `isEnvelope`'s structural check and the run-scoping in `relayIfCurrentRun`
-// apply to them.
+// apply to them. `connIndex` (04-throughput revision: multiple parallel
+// `RTCPeerConnection`s) is opaque to the DO too — it's relayed verbatim
+// alongside the payload and only read by the two peers, to pair each
+// negotiation message with the right one of their several connections.
 export interface IceServersPayload {
   iceServers: RTCIceServer[];
 }
@@ -72,9 +75,9 @@ export type Envelope =
   | { type: "run-finished"; runId: string; payload: Record<string, never> }
   | { type: "ice-servers"; runId: string; payload: IceServersPayload }
   | { type: "test-config"; runId: null; payload: TestConfigPayload }
-  | { type: "offer"; runId: string; payload: OfferPayload }
-  | { type: "answer"; runId: string; payload: AnswerPayload }
-  | { type: "ice-candidate"; runId: string; payload: IceCandidatePayload };
+  | { type: "offer"; runId: string; connIndex: number; payload: OfferPayload }
+  | { type: "answer"; runId: string; connIndex: number; payload: AnswerPayload }
+  | { type: "ice-candidate"; runId: string; connIndex: number; payload: IceCandidatePayload };
 
 export type EnvelopeType = Envelope["type"];
 
