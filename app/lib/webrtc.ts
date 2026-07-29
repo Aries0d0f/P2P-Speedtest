@@ -26,7 +26,7 @@ export type ChannelLabel = "control" | "bulk";
  * idle time between JS callbacks versus a single channel's send loop
  * stalling on one `bufferedamountlow` round trip at a time.
  */
-export const BULK_CHANNEL_COUNT = 4;
+export const BULK_CHANNEL_COUNT = 32;
 
 const BULK_LABEL_PATTERN = /^bulk-(\d+)$/;
 
