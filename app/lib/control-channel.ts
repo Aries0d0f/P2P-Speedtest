@@ -570,8 +570,17 @@ export class StageOrchestrator {
     }
     const sealed = s.receiver.finalize(s.remoteSentMeasuredChunks);
     if (!sealed) return; // no usable total -> no edge; the stage timeout covers this
-    const latency = this.cutLatencyWindow();
-    if (!latency) return; // no usable latency this window -> no edge (S6)
+    const latency = this.currentLatencyAggregate();
+    if (!latency) {
+      // A stage fast enough to finish transferring before the ping cadence
+      // has landed 3 round trips yet (S6's minimum) isn't a failure — the
+      // link is just quick. Wait for more samples rather than declaring
+      // this edge unsendable outright; the stage timeout is still the
+      // backstop if samples genuinely never come (e.g. the control channel
+      // itself is in trouble).
+      setTimeout(() => this.attemptSealAndSendResult(stageId), PING_CADENCE_MS);
+      return;
+    }
 
     s.localResultSent = true;
     const measurement: Measurement = { ...sealed, latency: latency.rttMs, jitter: latency.jitterMs };
@@ -754,10 +763,13 @@ export class StageOrchestrator {
     this.sendRaw(JSON.stringify({ runId: this.runId, type: "ping", seq, payload: {} }));
   }
 
-  private cutLatencyWindow(): Aggregate | null {
-    const agg = aggregateSamples(this.currentLatencySamples);
-    this.currentLatencySamples = [];
-    return agg;
+  // Non-destructive: the window boundary is `beginTransfer`'s reset at the
+  // *next* stage's start, not this read. A very fast stage can otherwise
+  // finish before the ping cadence lands 3 samples, and `attemptSealAnd-
+  // SendResult` retries this same read rather than starting a fresh window
+  // each time — retrying would just keep discarding partial progress.
+  private currentLatencyAggregate(): Aggregate | null {
+    return aggregateSamples(this.currentLatencySamples);
   }
 }
 
