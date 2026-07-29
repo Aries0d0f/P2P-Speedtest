@@ -203,6 +203,40 @@ describe("BulkSender", () => {
     expect(channel.bufferedAmount).toBeGreaterThan(channel.bufferedAmountLowThreshold - frameBytes);
   });
 
+  it("round-robins chunks across channels one at a time, never draining one channel before starting the next", () => {
+    vi.setSystemTime(RAMP_UP_MS); // skip ramp-up for this test
+    const channels = [new FakeChannel(), new FakeChannel(), new FakeChannel()];
+    const sendOrder: number[] = [];
+    channels.forEach((c, i) => {
+      const realSend = c.send.bind(c);
+      c.send = (data: ArrayBuffer) => {
+        sendOrder.push(i);
+        realSend(data);
+      };
+    });
+    const sender = new BulkSender({
+      channels,
+      runId: RUN_ID,
+      stageId: 0,
+      chunkBytes: 1000,
+      maxDurationMs: 60_000,
+      maxBytes: 1_000_000_000,
+      rampUpMs: 0,
+    });
+    sender.start();
+
+    // Every channel should have gotten a turn well before any one of them
+    // got a second chunk — cycling 0,1,2,0,1,2,… rather than 0,0,0,…,1,1,1,….
+    expect(sendOrder.slice(0, 9)).toEqual([0, 1, 2, 0, 1, 2, 0, 1, 2]);
+    // And, at rest, every channel carries roughly its fair share rather
+    // than one being full while the others sit empty.
+    const amounts = channels.map((c) => c.bufferedAmount);
+    for (const amount of amounts) {
+      expect(amount).toBeGreaterThan(0);
+      expect(Math.abs(amount - amounts[0])).toBeLessThanOrEqual(1000 + BULK_FRAME_HEADER_BYTES);
+    }
+  });
+
   it("stop() prevents any further sends, including the end marker", () => {
     vi.setSystemTime(0);
     const channel = new FakeChannel();

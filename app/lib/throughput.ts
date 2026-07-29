@@ -122,13 +122,18 @@ export const RAMP_UP_MS = 1500;
 // dispatch, SCTP bookkeeping) independent of link speed. A small threshold
 // means paying that overhead every few hundred KB, which throttles a fast
 // (e.g. direct LAN) link far below what the wire can actually do — the
-// bottleneck becomes the JS/event-loop round trip, not the network. Keep
-// enough queued that the browser rarely runs dry between events: at least
-// a few MiB, and scaled up further for a large chunk size. Client-side
-// only — the numbers that actually shape a test (duration, byte cap, chunk
-// size) come from server-issued `test-config`, never this.
-const BUFFERED_LOW_THRESHOLD_CHUNKS = 32;
-const BUFFERED_LOW_THRESHOLD_MIN_BYTES = 4 * 1024 * 1024; // 4 MiB — cheap for a run lasting seconds
+// bottleneck becomes the JS/event-loop round trip, not the network. Client-
+// side only — the numbers that actually shape a test (duration, byte cap,
+// chunk size) come from server-issued `test-config`, never this.
+//
+// This is an *aggregate* target across every channel, not per channel:
+// with `BULK_CHANNEL_COUNT` potentially large, a fixed per-channel floor
+// would multiply total queued memory by channel count for no benefit —
+// keeping the pipe full doesn't need more total bytes queued just because
+// it's spread over more channels, it needs each channel's own share of
+// that same total.
+const AGGREGATE_BUFFERED_LOW_THRESHOLD_BYTES = 8 * 1024 * 1024; // 8 MiB total
+const BUFFERED_LOW_THRESHOLD_MIN_CHUNKS_PER_CHANNEL = 8;
 
 export interface BulkSenderOptions {
   /** One or more channels to fan the measured stream across (04-throughput
@@ -211,8 +216,8 @@ export class BulkSender {
     const now = Date.now();
     this.rampUpEndsAt = now + this.opts.rampUpMs;
     const threshold = Math.max(
-      this.opts.chunkBytes * BUFFERED_LOW_THRESHOLD_CHUNKS,
-      BUFFERED_LOW_THRESHOLD_MIN_BYTES,
+      this.opts.chunkBytes * BUFFERED_LOW_THRESHOLD_MIN_CHUNKS_PER_CHANNEL,
+      Math.floor(AGGREGATE_BUFFERED_LOW_THRESHOLD_BYTES / this.opts.channels.length),
     );
     this.opts.channels.forEach((channel, i) => {
       channel.bufferedAmountLowThreshold = threshold;
@@ -232,15 +237,27 @@ export class BulkSender {
     );
   }
 
-  /** One pass over every channel, filling each until it hits its own
-   * threshold. Re-entered whenever any one channel's `bufferedamountlow`
-   * fires; a channel still above its threshold when visited is a cheap
-   * no-op (the inner `while` never executes). */
+  /** Round-robins one chunk at a time across every channel with room,
+   * repeating passes until none has any left — never fully draining one
+   * channel's headroom before giving the next channel anything. Filling
+   * channel 0 to its threshold before touching channel 1 (an earlier
+   * version of this loop did exactly that) front-loads one stream over the
+   * others every single pass: since every data channel on one
+   * `RTCPeerConnection` shares one SCTP association, handing one stream a
+   * large lead in queued data is what actually produces the "channels
+   * fill in sequence, not in parallel" behavior visible in
+   * `chrome://webrtc-internals` — not just a cosmetic ordering choice.
+   * Re-entered whenever any one channel's `bufferedamountlow` fires; a
+   * channel still above its threshold when visited is a cheap skip. */
   private pump(): void {
     if (this.stopped || this.phase === "done") return;
-    for (const channel of this.opts.channels) {
-      while (channel.bufferedAmount < channel.bufferedAmountLowThreshold) {
-        if (!this.sendNext(channel)) return;
+    let sentAny = true;
+    while (sentAny) {
+      sentAny = false;
+      for (const channel of this.opts.channels) {
+        if (channel.bufferedAmount >= channel.bufferedAmountLowThreshold) continue;
+        if (!this.sendNext(channel)) return; // phase finished mid-pass
+        sentAny = true;
       }
     }
   }
