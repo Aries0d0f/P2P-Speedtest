@@ -1,0 +1,76 @@
+# Example instance conforming to p2p-speedtest-result.v1.schema.yaml.
+# This is peer A's copy of the record for a completed, direct (non-relayed)
+# test between two peers. Peer B's copy would be byte-identical in `data`,
+# differing only in `metadata.peer-id`.
+
+apiVersion: sws.aries0d0f.me/v1
+kind: P2PSpeedtestResult
+metadata:
+  id: "4G7QZKX9M"
+  peer-id: "3f29a1c4-5e6b-5a2d-9f3e-1b7c8d4a2e10"
+  hash: "50d858e0985ecc7f60418aaf0cc5ab587f42c2570a884095a9e8ccacd0f6545c"
+data:
+  room: "4G7QZKX9M"
+  status: SUCCESSED
+  timestamp: "2026-07-29T14:32:07Z"
+  peers:
+    - id: "3f29a1c4-5e6b-5a2d-9f3e-1b7c8d4a2e10"
+      ip: "203.0.113.42"
+      protocol: IPv4
+      geo:
+        continent: "Asia"
+        continentCode: "AS"
+        country: "Taiwan"
+        countryCode: "TW"
+        region: "TPE"
+        regionName: "Taipei"
+        city: "Taipei"
+        district: ""
+        zip: "100"
+        lat: 25.033
+        lon: 121.5654
+        timezone: "Asia/Taipei"
+        offset: 28800
+        isp: "Example ISP"
+        org: "Example Org"
+        as: "AS12345 Example AS"
+        asname: "EXAMPLE-AS"
+        mobile: false
+        proxy: false
+        hosting: false
+    - id: "8a4d2b91-7c3e-5f1a-b6d8-2e9f4c7a1b35"
+      ip: "198.51.100.17"
+      protocol: IPv4
+      geo:
+        continent: "Europe"
+        continentCode: "EU"
+        country: "Germany"
+        countryCode: "DE"
+        region: "BE"
+        regionName: "Berlin"
+        city: "Berlin"
+        district: ""
+        zip: "10115"
+        lat: 52.532
+        lon: 13.3847
+        timezone: "Europe/Berlin"
+        offset: 7200
+        isp: "Example ISP DE"
+        org: "Example Org DE"
+        as: "AS67890 Example AS DE"
+        asname: "EXAMPLE-DE-AS"
+        mobile: false
+        proxy: false
+        hosting: false
+  bandwidth:
+    - from: "3f29a1c4-5e6b-5a2d-9f3e-1b7c8d4a2e10"
+      to: "8a4d2b91-7c3e-5f1a-b6d8-2e9f4c7a1b35"
+      speed: 94500000
+      latency: 38.2
+      jitter: 2.1
+    - from: "8a4d2b91-7c3e-5f1a-b6d8-2e9f4c7a1b35"
+      to: "3f29a1c4-5e6b-5a2d-9f3e-1b7c8d4a2e10"
+      speed: 91200000
+      latency: 38.2
+      jitter: 2.1
+  via: DIRECT
