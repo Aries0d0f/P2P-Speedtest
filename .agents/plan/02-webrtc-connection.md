@@ -212,21 +212,21 @@ drive offer/answer negotiation from signaling messages, exchange ICE
 candidates, and expose connection-state changes as callbacks. Keep WebRTC
 plumbing out of the route component.
 
-**Create both channels here, before slot 0's initial offer:**
+**Create every channel here, before slot 0's initial offer:**
 
 | Label | Config | Used by |
 |---|---|---|
 | `control` | reliable, ordered | 2.6's profile exchange, Phase 3's ping/pong, Phase 4's stage FSM and result exchange |
-| `bulk` | `ordered: false, maxRetransmits: 0` | Phase 4's throughput payload |
+| `bulk-0..bulk-{N-1}` (`BULK_CHANNEL_COUNT`, revised — see 04-throughput-measurement.md "Revision: parallel bulk channels") | `ordered: false, maxRetransmits: 0` each | Phase 4's throughput payload |
 
-Slot 1 accepts both by label via `ondatachannel`, registered before it
+Slot 1 accepts every one by label via `ondatachannel`, registered before it
 applies the offer.
 
-Both are created in this phase even though later phases own what flows over
-them: a channel added to an already-connected peer connection triggers SDP
-renegotiation, and there is no renegotiation flow. Creating them with the
-first offer means there is never a second one — and this phase needs
-`control` itself, for the profile exchange.
+Every channel is created in this phase even though later phases own what
+flows over them: a channel added to an already-connected peer connection
+triggers SDP renegotiation, and there is no renegotiation flow. Creating
+them all with the first offer means there is never a second one — and this
+phase needs `control` itself, for the profile exchange.
 
 Implement the three rules from "Negotiation contract", and expose a
 `stopProducing()` / `teardown()` pair that obeys the terminal ordering in
