@@ -4,7 +4,10 @@ import {
   BulkReceiver,
   BulkSender,
   encodeBulkFrame,
+  HARD_DEADLINE_MARGIN_MS,
   parseBulkFrame,
+  PROGRESS_INTERVAL_MS,
+  QUIET_PERIOD_MS,
   RAMP_UP_MS,
   type BulkChannel,
   type BulkFrame,
@@ -96,7 +99,11 @@ class FakeChannel implements BulkChannel {
   private listeners: Array<() => void> = [];
 
   send(data: ArrayBuffer): void {
-    this.sent.push(data);
+    // Real `RTCDataChannel.send(ArrayBuffer)` copies the bytes before
+    // returning (structured-clone semantics) — BulkSender relies on that
+    // to safely reuse one buffer across calls, so the fake must copy too,
+    // or every recorded frame would alias the same mutated buffer.
+    this.sent.push(data.slice(0));
     this.bufferedAmount += data.byteLength;
   }
   addEventListener(_type: "bufferedamountlow", listener: () => void): void {
@@ -129,18 +136,23 @@ describe("BulkSender", () => {
       chunkBytes: 100,
       maxDurationMs: 1000,
       maxBytes: 1_000_000,
+      // Pinned explicitly rather than relying on the module's RAMP_UP_MS:
+      // the backpressure threshold is now generous enough (16 MiB floor)
+      // that a real ramp-up window would fully drain-and-refill many times
+      // over on this fake channel's instant `drain()` before real time
+      // elapses, generating and retaining a huge number of frames for no
+      // reason. A short, test-scoped ramp-up keeps that burst bounded.
+      rampUpMs: 20,
       onComplete: (n) => (completedWith = n),
     });
 
     sender.start();
-    // A generous buffer (throughput.ts's backpressure threshold) means a
-    // small test transfer like this one can complete within very few
-    // drain cycles rather than one distinct burst per phase — advance in
-    // small steps and drain after each until the sender finishes, then
-    // check the shape of the *whole* recorded sequence instead of
-    // snapshotting between phases.
-    for (let i = 0; i < 300 && completedWith === undefined; i++) {
-      vi.setSystemTime(i * 10);
+    // With a buffer this large relative to this test's small transfer, the
+    // whole thing can complete within a couple of drain cycles rather than
+    // one distinct burst per phase — check the shape of the *whole*
+    // recorded sequence instead of snapshotting between phases.
+    for (let i = 0; i < 10 && completedWith === undefined; i++) {
+      vi.setSystemTime(20 + i * 1000);
       channel.drain();
     }
     expect(completedWith).toBeGreaterThan(0);
@@ -272,7 +284,7 @@ describe("BulkReceiver", () => {
     });
     receiver.arm();
     receiver.handleFrame(frame(0));
-    vi.advanceTimersByTime(499);
+    vi.advanceTimersByTime(QUIET_PERIOD_MS - 1);
     expect(closes).toEqual([]);
     vi.advanceTimersByTime(2);
     expect(closes).toEqual(["quiet-period"]);
@@ -288,7 +300,7 @@ describe("BulkReceiver", () => {
       onWindowClosed: (r) => closes.push(r),
     });
     receiver.arm();
-    vi.advanceTimersByTime(RAMP_UP_MS + 1000 + 5000 - 1);
+    vi.advanceTimersByTime(RAMP_UP_MS + 1000 + HARD_DEADLINE_MARGIN_MS - 1);
     expect(closes).toEqual([]);
     vi.advanceTimersByTime(1);
     expect(closes).toEqual(["hard-deadline"]);
@@ -337,7 +349,7 @@ describe("BulkReceiver", () => {
     expect(receiver2.finalize(-1)).toBeNull();
   });
 
-  it("emits progress at most once per 250ms plus one final update on close", () => {
+  it(`emits progress at most once per ${PROGRESS_INTERVAL_MS}ms plus one final update on close`, () => {
     vi.setSystemTime(0);
     const updates: number[] = [];
     const receiver = new BulkReceiver({
@@ -350,10 +362,10 @@ describe("BulkReceiver", () => {
 
     receiver.handleFrame(frame(0)); // t=0 -> emits (first ever)
     receiver.handleFrame(frame(1)); // t=0 -> throttled
-    vi.setSystemTime(100);
-    receiver.handleFrame(frame(2)); // t=100 -> still within 250ms, throttled
-    vi.setSystemTime(300);
-    receiver.handleFrame(frame(3)); // t=300 -> emits
+    vi.setSystemTime(Math.floor(PROGRESS_INTERVAL_MS / 3));
+    receiver.handleFrame(frame(2)); // still within the interval -> throttled
+    vi.setSystemTime(PROGRESS_INTERVAL_MS + 1);
+    receiver.handleFrame(frame(3)); // interval elapsed -> emits
     expect(updates).toEqual([1, 4]);
 
     receiver.handleFrame(frame(4, "end")); // final update, unconditional

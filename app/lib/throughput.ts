@@ -113,7 +113,7 @@ export interface BulkChannel {
  * measured window. Ramp-up chunks never consume the measured sequence
  * space (4.1 design notes). Exported so `BulkReceiver`'s hard deadline can
  * budget for it without duplicating the constant. */
-export const RAMP_UP_MS = 500;
+export const RAMP_UP_MS = 1500;
 
 // Each `bufferedamountlow` round trip carries real fixed overhead (event
 // dispatch, SCTP bookkeeping) independent of link speed. A small threshold
@@ -124,8 +124,8 @@ export const RAMP_UP_MS = 500;
 // a few MiB, and scaled up further for a large chunk size. Client-side
 // only — the numbers that actually shape a test (duration, byte cap, chunk
 // size) come from server-issued `test-config`, never this.
-const BUFFERED_LOW_THRESHOLD_CHUNKS = 32;
-const BUFFERED_LOW_THRESHOLD_MIN_BYTES = 4 * 1024 * 1024; // 4 MiB
+const BUFFERED_LOW_THRESHOLD_CHUNKS = 64;
+const BUFFERED_LOW_THRESHOLD_MIN_BYTES = 16 * 1024 * 1024; // 16 MiB — cheap for a run lasting seconds
 
 export interface BulkSenderOptions {
   channel: BulkChannel;
@@ -150,7 +150,16 @@ type SenderPhase = "ramp-up" | "measured" | "done";
 export class BulkSender {
   private readonly opts: Required<Omit<BulkSenderOptions, "onComplete">> &
     Pick<BulkSenderOptions, "onComplete">;
-  private readonly payload: Uint8Array;
+  // One preallocated measured/ramp-up frame, mutated (seq + kind byte only)
+  // and resent on every call rather than allocated fresh each time.
+  // `RTCDataChannel.send(ArrayBuffer)` copies its contents synchronously
+  // before returning (structured-clone semantics, no transfer list), so
+  // reusing this buffer immediately after `send()` returns is safe — and
+  // it's what turns "one allocation + one memcpy per chunk" into zero,
+  // which matters once you're sending thousands of chunks/sec.
+  private readonly frameBuffer: ArrayBuffer;
+  private readonly frameBytes: Uint8Array;
+  private readonly frameView: DataView;
 
   private phase: SenderPhase = "ramp-up";
   private nextSeq = 0;
@@ -164,7 +173,16 @@ export class BulkSender {
 
   constructor(opts: BulkSenderOptions) {
     this.opts = { rampUpMs: RAMP_UP_MS, onComplete: opts.onComplete, ...opts };
-    this.payload = new Uint8Array(this.opts.chunkBytes);
+
+    this.frameBuffer = new ArrayBuffer(BULK_FRAME_HEADER_BYTES + this.opts.chunkBytes);
+    this.frameBytes = new Uint8Array(this.frameBuffer);
+    this.frameView = new DataView(this.frameBuffer);
+    // runId and stageId never change for this sender's lifetime — written
+    // once here. `seq` and the kind byte are the only per-send mutations.
+    this.frameBytes.set(uuidToBytes(this.opts.runId), 0);
+    this.frameBytes[16] = this.opts.stageId;
+    // The payload region (byte 22 onward) stays zero-filled; its content
+    // is never inspected by either side, only its length.
   }
 
   get sentMeasuredChunks(): number {
@@ -212,7 +230,7 @@ export class BulkSender {
         this.measuredDeadlineAt = now + this.opts.maxDurationMs;
         return this.sendNext();
       }
-      this.send({ runId: this.opts.runId, stageId: this.opts.stageId, seq: 0, kind: "ramp-up", data: this.payload });
+      this.sendFrame(0, "ramp-up");
       return true;
     }
 
@@ -222,27 +240,37 @@ export class BulkSender {
       return false;
     }
     const seq = this.nextSeq++;
-    this.send({ runId: this.opts.runId, stageId: this.opts.stageId, seq, kind: "measured", data: this.payload });
-    this.bytesSent += this.payload.byteLength;
+    this.sendFrame(seq, "measured");
+    this.bytesSent += this.opts.chunkBytes;
     return true;
   }
 
   private finish(): void {
     this.phase = "done";
-    this.send({
-      runId: this.opts.runId,
-      stageId: this.opts.stageId,
-      seq: this.nextSeq,
-      kind: "end",
-      data: new Uint8Array(0),
-    });
+    this.sendRaw(
+      encodeBulkFrame({
+        runId: this.opts.runId,
+        stageId: this.opts.stageId,
+        seq: this.nextSeq,
+        kind: "end",
+        data: new Uint8Array(0),
+      }),
+    );
     this.stop();
     this.opts.onComplete?.(this.nextSeq);
   }
 
-  private send(frame: { runId: string; stageId: StageId; seq: number; kind: BulkFrameKind; data: Uint8Array }): void {
+  /** Writes `seq`/kind into the reused frame buffer and sends it — the hot
+   * path for every ramp-up/measured chunk. */
+  private sendFrame(seq: number, kind: BulkFrameKind): void {
+    this.frameView.setUint32(17, seq, false);
+    this.frameBytes[21] = KIND_CODES[kind];
+    this.sendRaw(this.frameBuffer);
+  }
+
+  private sendRaw(buffer: ArrayBuffer): void {
     try {
-      this.opts.channel.send(encodeBulkFrame(frame));
+      this.opts.channel.send(buffer);
     } catch {
       // Channel already closed — the surrounding room/control-channel
       // handles a closed bulk channel as its own failure trigger.
@@ -252,12 +280,20 @@ export class BulkSender {
 
 // --- Receiver ------------------------------------------------------------
 
-const QUIET_PERIOD_MS = 500;
-const PROGRESS_INTERVAL_MS = 250;
+// Exported (rather than kept module-private) so tests reference these
+// exact values instead of duplicating them as magic numbers that silently
+// drift out of sync whenever the constants here are retuned.
+export const QUIET_PERIOD_MS = 1000;
+export const PROGRESS_INTERVAL_MS = 50;
+// How often handleFrame is allowed to actually reschedule the quiet timer
+// (see resetQuietTimer) — well under QUIET_PERIOD_MS so the close-on-quiet
+// detection stays effectively as tight, just without a timer churn on
+// every single chunk.
+const QUIET_TIMER_RESET_THROTTLE_MS = 100;
 // Margin over the sender's own ramp-up + measured budget: covers
 // negotiation/scheduling jitter so the receiver's own hard deadline is
 // never the thing that cuts off a well-behaved sender.
-const HARD_DEADLINE_MARGIN_MS = 5_000;
+export const HARD_DEADLINE_MARGIN_MS = 15_000;
 
 export interface ReceiverSnapshot {
   elapsedMs: number;
@@ -305,6 +341,7 @@ export class BulkReceiver {
   private armed = false;
   private closed = false;
   private lastProgressAt = -Infinity;
+  private lastQuietTimerResetAt = -Infinity;
 
   private quietTimer: ReturnType<typeof setTimeout> | null = null;
   private hardDeadlineTimer: ReturnType<typeof setTimeout> | null = null;
@@ -340,7 +377,7 @@ export class BulkReceiver {
     }
     if (this.firstChunkAt === null) this.firstChunkAt = now;
     this.lastActivityAt = now;
-    this.resetQuietTimer();
+    this.resetQuietTimer(now);
     this.maybeEmitProgress(now);
   }
 
@@ -394,7 +431,16 @@ export class BulkReceiver {
     return end - this.firstChunkAt;
   }
 
-  private resetQuietTimer(): void {
+  /** Throttled: rescheduling a timer on every single received chunk is
+   * real, avoidable overhead at high packet rates (thousands/sec), and a
+   * quiet-period detector doesn't need millisecond precision on exactly
+   * when it was last touched — only that it fires within ~`QUIET_PERIOD_MS`
+   * of true last activity. `lastActivityAt` itself is still updated on
+   * every frame regardless (in `handleFrame`), so `durationMs` stays exact
+   * even though the timer reschedule is throttled. */
+  private resetQuietTimer(now: number): void {
+    if (now - this.lastQuietTimerResetAt < QUIET_TIMER_RESET_THROTTLE_MS) return;
+    this.lastQuietTimerResetAt = now;
     if (this.quietTimer) clearTimeout(this.quietTimer);
     this.quietTimer = setTimeout(() => this.closeWindow("quiet-period"), QUIET_PERIOD_MS);
   }
