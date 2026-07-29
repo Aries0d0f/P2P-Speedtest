@@ -332,7 +332,10 @@ export interface StageOrchestratorOptions {
   testConfig: TestConfigPayload;
   /** Writes one already-serialized message to the reliable control channel. */
   send: (raw: string) => void;
-  bulkChannel: BulkChannel;
+  /** Every parallel bulk channel (04-throughput revision) — fanned out to
+   * for sending; frames arriving on any of them are handed to
+   * `handleBulkFrame` the same way regardless of which one delivered them. */
+  bulkChannels: BulkChannel[];
   callbacks?: StageOrchestratorCallbacks;
 }
 
@@ -369,7 +372,7 @@ export class StageOrchestrator {
   private readonly selfSlot: Slot;
   private readonly testConfig: TestConfigPayload;
   private readonly sendRaw: (raw: string) => void;
-  private readonly bulkChannel: BulkChannel;
+  private readonly bulkChannels: BulkChannel[];
   private readonly callbacks: StageOrchestratorCallbacks;
 
   private stage: StageState | null = null;
@@ -388,7 +391,7 @@ export class StageOrchestrator {
     this.selfSlot = opts.selfSlot;
     this.testConfig = opts.testConfig;
     this.sendRaw = opts.send;
-    this.bulkChannel = opts.bulkChannel;
+    this.bulkChannels = opts.bulkChannels;
     this.callbacks = opts.callbacks ?? {};
   }
 
@@ -686,7 +689,7 @@ export class StageOrchestrator {
 
     const sender = senderRole
       ? new BulkSender({
-          channel: this.bulkChannel,
+          channels: this.bulkChannels,
           runId: this.runId,
           stageId,
           chunkBytes: this.testConfig.chunkBytes,
