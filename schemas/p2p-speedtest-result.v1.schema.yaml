@@ -24,8 +24,9 @@ properties:
 $defs:
   roomId:
     type: string
-    description: Room ID (9-character alphanumeric slug).
-    pattern: "^[0-9A-Za-z]{9}$"
+    description: >-
+      Room ID: a 9-character Crockford base32 slug encoding the room's 42-bit token.
+    pattern: "^[0-9ABCDEFGHJKMNPQRSTVWXYZ]{9}$"
 
   peerId:
     type: string
@@ -40,9 +41,14 @@ $defs:
 
   ipAddress:
     type: string
+    description: >-
+      A peer's IP, either in full or masked when privacy mode requires it
+      (IPv4 `104.xxx.xxx.235`, IPv6 `2001::xxxx:3965`).
     anyOf:
       - format: ipv4
       - format: ipv6
+      - pattern: "^[0-9]{1,3}\\.xxx\\.xxx\\.[0-9]{1,3}$"
+      - pattern: "^[0-9a-f]{1,4}::xxxx:[0-9a-f]{1,4}$"
 
   geo:
     type: object
@@ -102,13 +108,21 @@ $defs:
     additionalProperties: false
     required:
       - id
-      - ip
-      - protocol
-      - geo
-    description: One peer connected to the room.
+      - name
+    description: >-
+      One peer connected to the room, as that peer described itself. `ua`
+      and `geo` are omitted, and `ip` is masked, when its privacy mode
+      withholds them; `ip`/`protocol` are omitted when it never determined
+      its own address.
     properties:
       id:
         $ref: "#/$defs/peerId"
+      name:
+        type: string
+        description: Human-readable name for this peer, as provided by the client.
+      ua:
+        type: string
+        description: User agent string for this peer, as provided by the client.
       ip:
         $ref: "#/$defs/ipAddress"
       protocol:
@@ -128,6 +142,7 @@ $defs:
       - speed
       - latency
       - jitter
+      - loss
     description: Measured throughput and latency in one direction, between two peers.
     properties:
       from:
@@ -146,6 +161,12 @@ $defs:
         type: number
         minimum: 0
         description: Jitter in milliseconds.
+      loss:
+        type: number
+        format: float
+        minimum: 0
+        maximum: 1
+        description: Fraction of chunks the receiver never saw, 0-1.
 
   metadata:
     type: object
@@ -175,32 +196,47 @@ $defs:
       - bandwidth
       - via
     description: >-
-      Result of the test. `peers`/`bandwidth` have exactly two entries when
-      `status` is SUCCESSED; otherwise they may have fewer.
+      Result of the test. There are always two peer entries once measurement
+      begins. When `status` is SUCCEED there are also two edges in each
+      bandwidth group; otherwise either group may be shorter or absent.
     properties:
       room:
         $ref: "#/$defs/roomId"
       status:
         type: string
         enum:
-          - SUCCESSED
+          - SUCCEED
           - FAILED
           - CANCELED
         description: Outcome of the test.
       timestamp:
         type: string
         format: date-time
-        description: ISO 8601 completion timestamp.
+        description: >-
+          Canonical ISO 8601 run timestamp, authored by slot 0 and shared
+          before measurement begins. This is not a completion timestamp.
       peers:
         type: array
+        minItems: 2
         maxItems: 2
         items:
           $ref: "#/$defs/peer"
       bandwidth:
-        type: array
-        maxItems: 2
-        items:
-          $ref: "#/$defs/bandwidthEdge"
+        type: object
+        additionalProperties: false
+        properties:
+          directional:
+            type: array
+            maxItems: 2
+            description: One edge per direction, measured one direction at a time.
+            items:
+              $ref: "#/$defs/bandwidthEdge"
+          duplex:
+            type: array
+            maxItems: 2
+            description: One edge per direction, measured with both running at once.
+            items:
+              $ref: "#/$defs/bandwidthEdge"
       via:
         type: string
         enum:
@@ -213,13 +249,18 @@ $defs:
     if:
       properties:
         status:
-          const: SUCCESSED
+          const: SUCCEED
     then:
       properties:
-        peers:
-          minItems: 2
         bandwidth:
-          minItems: 2
+          required:
+            - directional
+            - duplex
+          properties:
+            directional:
+              minItems: 2
+            duplex:
+              minItems: 2
         via:
           not:
             const: UNKNOWN

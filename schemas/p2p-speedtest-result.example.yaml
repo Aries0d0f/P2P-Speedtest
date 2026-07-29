@@ -11,10 +11,11 @@ metadata:
   hash: "50d858e0985ecc7f60418aaf0cc5ab587f42c2570a884095a9e8ccacd0f6545c"
 data:
   room: "4G7QZKX9M"
-  status: SUCCESSED
+  status: SUCCEED
   timestamp: "2026-07-29T14:32:07Z"
   peers:
     - id: "3f29a1c4-5e6b-5a2d-9f3e-1b7c8d4a2e10"
+      name: "Peer A"
       ip: "203.0.113.42"
       protocol: IPv4
       geo:
@@ -39,6 +40,7 @@ data:
         proxy: false
         hosting: false
     - id: "8a4d2b91-7c3e-5f1a-b6d8-2e9f4c7a1b35"
+      name: "Peer B"
       ip: "198.51.100.17"
       protocol: IPv4
       geo:
@@ -63,14 +65,30 @@ data:
         proxy: false
         hosting: false
   bandwidth:
-    - from: "3f29a1c4-5e6b-5a2d-9f3e-1b7c8d4a2e10"
-      to: "8a4d2b91-7c3e-5f1a-b6d8-2e9f4c7a1b35"
-      speed: 94500000
-      latency: 38.2
-      jitter: 2.1
-    - from: "8a4d2b91-7c3e-5f1a-b6d8-2e9f4c7a1b35"
-      to: "3f29a1c4-5e6b-5a2d-9f3e-1b7c8d4a2e10"
-      speed: 91200000
-      latency: 38.2
-      jitter: 2.1
+    directional:
+      - from: "3f29a1c4-5e6b-5a2d-9f3e-1b7c8d4a2e10"
+        to: "8a4d2b91-7c3e-5f1a-b6d8-2e9f4c7a1b35"
+        speed: 94500000
+        latency: 38.2
+        jitter: 2.1
+        loss: 0.0004
+      - from: "8a4d2b91-7c3e-5f1a-b6d8-2e9f4c7a1b35"
+        to: "3f29a1c4-5e6b-5a2d-9f3e-1b7c8d4a2e10"
+        speed: 91200000
+        latency: 38.2
+        jitter: 2.1
+        loss: 0.0011
+    duplex:
+      - from: "3f29a1c4-5e6b-5a2d-9f3e-1b7c8d4a2e10"
+        to: "8a4d2b91-7c3e-5f1a-b6d8-2e9f4c7a1b35"
+        speed: 78400000
+        latency: 51.6
+        jitter: 4.8
+        loss: 0.0062
+      - from: "8a4d2b91-7c3e-5f1a-b6d8-2e9f4c7a1b35"
+        to: "3f29a1c4-5e6b-5a2d-9f3e-1b7c8d4a2e10"
+        speed: 74900000
+        latency: 51.6
+        jitter: 4.8
+        loss: 0.0074
   via: DIRECT
