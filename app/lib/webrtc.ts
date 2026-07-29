@@ -1,13 +1,27 @@
 /**
- * RTCPeerConnection wrapper (2.2, 2.3). Owns offer/answer negotiation,
- * ICE candidate exchange, both data channels, relay classification, and
- * the stopProducing()/teardown() pair that the room's terminal handoff
- * (2.4) drives without reaching inside measurement modules.
+ * RTCPeerConnection wrapper (2.2, 2.3; multi-connection revision — see
+ * 04-throughput-measurement.md "Revision: parallel RTCPeerConnections").
+ * Each instance owns exactly **one** `RTCPeerConnection` and **one** data
+ * channel (its offer/answer negotiation, ICE candidate exchange, relay
+ * classification, and the stopProducing()/teardown() pair that the room's
+ * terminal handoff (2.4) drives without reaching inside measurement
+ * modules).
+ *
+ * Bulk throughput comes from running `BULK_CONNECTION_COUNT` of these in
+ * parallel — genuinely parallel, unlike multiple data channels on one
+ * connection: each `RTCPeerConnection` gets its own ICE negotiation, DTLS
+ * session, and SCTP association, hence its own independent congestion
+ * window, the same way parallel TCP/WebSocket connections would. The
+ * caller (room.tsx) is what fans out; this class only ever knows about the
+ * one connection/channel it was constructed for.
  *
  * Deliberately signaling-transport-agnostic: the caller hands in `send`
  * (writes to the already-open signaling socket) and feeds inbound
- * offer/answer/ice-candidate envelopes to `handleSignalingMessage`. This
- * module never touches the WebSocket itself.
+ * offer/answer/ice-candidate envelopes matching this instance's own
+ * `connIndex` to `handleSignalingMessage`. This module never touches the
+ * WebSocket itself, and never inspects an envelope's `connIndex` beyond
+ * stamping its own on outgoing messages — routing an inbound envelope to
+ * the right instance is the caller's job.
  */
 
 import type { Envelope, Slot } from "./protocol";
@@ -15,34 +29,18 @@ import type { Envelope, Slot } from "./protocol";
 export type ConnectionType = "DIRECT" | "RELAY" | "UNKNOWN";
 
 export type ChannelLabel = "control" | "bulk";
+export type ConnectionRole = ChannelLabel;
 
-/**
- * Bulk transfer runs over this many parallel data channels rather than one
- * (04-throughput-measurement.md revision, performance finding). All of
- * them still multiplex over the single SCTP association a `RTCPeerConnection`
- * gets — this doesn't buy independent congestion windows the way parallel
- * TCP connections do — but it keeps more data "ready to send" across
- * independent per-channel backpressure loops, which measurably reduces
- * idle time between JS callbacks versus a single channel's send loop
- * stalling on one `bufferedamountlow` round trip at a time.
- */
-export const BULK_CHANNEL_COUNT = 4;
+/** How many parallel bulk `RTCPeerConnection`s (04-throughput revision) —
+ * one data channel each, run alongside the one control connection. */
+export const BULK_CONNECTION_COUNT = 4;
 
-const BULK_LABEL_PATTERN = /^bulk-(\d+)$/;
-
-function bulkChannelLabel(index: number): string {
-  return `bulk-${index}`;
-}
-
-/** Returns the channel's bulk index, or `null` if it's not a bulk channel
- * (i.e. it's the control channel). Exported so callers (room.tsx) can
- * recover the same index from `RTCDataChannel.label` without duplicating
- * the parsing rule. */
-export function bulkChannelIndex(label: string): number | null {
-  const match = BULK_LABEL_PATTERN.exec(label);
-  if (!match) return null;
-  const index = Number(match[1]);
-  return index >= 0 && index < BULK_CHANNEL_COUNT ? index : null;
+/** `connIndex` values: 0 is always the control connection; bulk
+ * connections take 1..`BULK_CONNECTION_COUNT`. Exported so room.tsx and
+ * this module agree on the numbering without duplicating it. */
+export const CONTROL_CONN_INDEX = 0;
+export function bulkConnIndex(bulkSlot: number): number {
+  return CONTROL_CONN_INDEX + 1 + bulkSlot;
 }
 
 export interface WebrtcCallbacks {
@@ -60,6 +58,13 @@ export interface WebrtcCallbacks {
 export interface WebrtcOptions {
   slot: Slot;
   runId: string;
+  /** Which of this run's several `RTCPeerConnection`s this instance is —
+   * stamped on every outgoing offer/answer/ice-candidate so the peer can
+   * route it back to the matching instance on their side. */
+  connIndex: number;
+  /** Which single channel this connection carries: reliable/ordered
+   * `control`, or unordered/non-retransmitting `bulk`. */
+  role: ConnectionRole;
   iceServers: RTCIceServer[];
   send: (envelope: Envelope) => void;
   callbacks?: WebrtcCallbacks;
@@ -151,10 +156,9 @@ export class WebrtcConnection {
   private remoteDescriptionSet = false;
   private pendingCandidates: RTCIceCandidateInit[] = [];
 
-  private controlChannel: RTCDataChannel | null = null;
-  private readonly bulkChannels: (RTCDataChannel | null)[] = new Array(BULK_CHANNEL_COUNT).fill(
-    null,
-  );
+  private readonly connIndex: number;
+  private readonly role: ConnectionRole;
+  private channel: RTCDataChannel | null = null;
 
   private producing = true;
   private torndown = false;
@@ -165,6 +169,8 @@ export class WebrtcConnection {
   constructor(opts: WebrtcOptions) {
     this.slot = opts.slot;
     this.runId = opts.runId;
+    this.connIndex = opts.connIndex;
+    this.role = opts.role;
     this.send = opts.send;
     this.callbacks = opts.callbacks ?? {};
 
@@ -178,6 +184,7 @@ export class WebrtcConnection {
       this.send({
         type: "ice-candidate",
         runId: this.runId,
+        connIndex: this.connIndex,
         payload: event.candidate ? event.candidate.toJSON() : null,
       });
     };
@@ -220,30 +227,22 @@ export class WebrtcConnection {
     };
 
     if (this.slot === 0) {
-      // Every channel is created here, before the first (and only) offer:
-      // a channel added post-connect triggers renegotiation, and there is
-      // no renegotiation flow in this design.
-      this.wireChannel(this.pc.createDataChannel("control", { ordered: true }));
-      for (let i = 0; i < BULK_CHANNEL_COUNT; i++) {
-        this.wireChannel(
-          this.pc.createDataChannel(bulkChannelLabel(i), { ordered: false, maxRetransmits: 0 }),
-        );
-      }
+      // The channel is created here, before the first (and only) offer: a
+      // channel added post-connect triggers renegotiation, and there is no
+      // renegotiation flow in this design.
+      this.wireChannel(
+        this.role === "control"
+          ? this.pc.createDataChannel("control", { ordered: true })
+          : this.pc.createDataChannel("bulk", { ordered: false, maxRetransmits: 0 }),
+      );
       void this.startAsOfferer();
     }
   }
 
-  getControlChannel(): RTCDataChannel | null {
-    return this.controlChannel;
-  }
-
-  /** All `BULK_CHANNEL_COUNT` bulk channels, in index order. Only
-   * meaningful once every one of them has opened — callers gate on that
-   * themselves (room.tsx waits for `BULK_CHANNEL_COUNT` `onChannelOpen`
-   * calls before starting stages), so this never silently returns a
-   * partial, misordered set to a caller that assumed otherwise. */
-  getBulkChannels(): RTCDataChannel[] {
-    return this.bulkChannels.filter((c): c is RTCDataChannel => c !== null);
+  /** This connection's one channel — `control` or `bulk` depending on
+   * `role`. `null` until it opens. */
+  getChannel(): RTCDataChannel | null {
+    return this.channel;
   }
 
   getConnectionType(): ConnectionType {
@@ -316,16 +315,9 @@ export class WebrtcConnection {
     this.pendingCandidates = [];
     this.clearFailureConfirmTimer();
     try {
-      this.controlChannel?.close();
+      this.channel?.close();
     } catch {
       // already closed
-    }
-    for (const channel of this.bulkChannels) {
-      try {
-        channel?.close();
-      } catch {
-        // already closed
-      }
     }
     try {
       this.pc.close();
@@ -356,7 +348,7 @@ export class WebrtcConnection {
       const offer = await this.pc.createOffer();
       await this.pc.setLocalDescription(offer);
       if (!this.producing) return;
-      this.send({ type: "offer", runId: this.runId, payload: offer });
+      this.send({ type: "offer", runId: this.runId, connIndex: this.connIndex, payload: offer });
     } catch {
       this.callbacks.onFailure?.("negotiation-failed");
     }
@@ -370,7 +362,7 @@ export class WebrtcConnection {
       const answer = await this.pc.createAnswer();
       await this.pc.setLocalDescription(answer);
       if (!this.producing) return;
-      this.send({ type: "answer", runId: this.runId, payload: answer });
+      this.send({ type: "answer", runId: this.runId, connIndex: this.connIndex, payload: answer });
     } catch {
       this.callbacks.onFailure?.("negotiation-failed");
     }
@@ -419,14 +411,9 @@ export class WebrtcConnection {
   }
 
   private wireChannel(channel: RTCDataChannel): void {
-    const index = bulkChannelIndex(channel.label);
-    const label: ChannelLabel = index === null ? "control" : "bulk";
-    if (index !== null) {
-      channel.binaryType = "arraybuffer";
-      this.bulkChannels[index] = channel;
-    } else {
-      this.controlChannel = channel;
-    }
+    if (this.role === "bulk") channel.binaryType = "arraybuffer";
+    this.channel = channel;
+    const label = this.role;
     channel.onopen = () => this.callbacks.onChannelOpen?.(label, channel);
     channel.onmessage = (event) => this.callbacks.onChannelMessage?.(label, event);
     channel.onclose = () => this.callbacks.onChannelClose?.(label);
