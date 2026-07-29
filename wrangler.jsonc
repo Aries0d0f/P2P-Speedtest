@@ -16,18 +16,41 @@
 	"upload_source_maps": true,
 	"compatibility_flags": [
 		"nodejs_compat"
+	],
+	/**
+	 * Durable Objects
+	 * https://developers.cloudflare.com/durable-objects/
+	 */
+	"durable_objects": {
+		"bindings": [
+			{ "name": "SIGNALING_ROOM", "class_name": "SignalingRoom" }
+		]
+	},
+	"migrations": [
+		{ "tag": "v1", "new_sqlite_classes": ["SignalingRoom"] }
+	],
+	/**
+	 * Rate Limiting (S10) — one namespace/policy per binding, keyed on
+	 * CF-Connecting-IP at the Worker (workers/app.ts).
+	 * https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/
+	 */
+	"ratelimits": [
+		{
+			"name": "CREATE_RATE_LIMITER",
+			"namespace_id": "1001",
+			"simple": { "limit": 5, "period": 60 }
+		},
+		{
+			"name": "JOIN_RATE_LIMITER",
+			"namespace_id": "1002",
+			"simple": { "limit": 20, "period": 60 }
+		}
 	]
 	/**
 	 * Smart Placement
 	 * https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement
 	 */
 	// "placement": {  "mode": "smart" }
-	/**
-	 * Bindings
-	 * Bindings allow your Worker to interact with resources on the Cloudflare Developer Platform, including
-	 * databases, object storage, AI inference, real-time communication and more.
-	 * https://developers.cloudflare.com/workers/runtime-apis/bindings/
-	 */
 	/**
 	 * Static Assets
 	 * https://developers.cloudflare.com/workers/static-assets/binding/
