@@ -45,9 +45,10 @@ import { edgeKey, stageName, type StageId } from "~/lib/stage";
 import { parseBulkFrame } from "~/lib/throughput";
 import type { ChannelLabel, ConnectionType } from "~/lib/webrtc";
 import {
-  BULK_CHANNEL_COUNT,
-  bulkChannelIndex,
+  BULK_CONNECTION_COUNT,
+  CONTROL_CONN_INDEX,
   WebrtcConnection,
+  bulkConnIndex,
   isForceRelayRequested,
 } from "~/lib/webrtc";
 
@@ -274,7 +275,15 @@ export default function Room({ params }: Route.ComponentProps) {
   const [terminalResult, setTerminalResult] = useState<TerminalOutcome | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
-  const webrtcRef = useRef<WebrtcConnection | null>(null);
+  // 04-throughput revision: genuine parallelism needs independent SCTP
+  // associations, not just independent data channels on one — so bulk
+  // transfer runs over `BULK_CONNECTION_COUNT` separate RTCPeerConnections
+  // rather than one connection carrying several channels. `controlConnRef`
+  // is connIndex 0; `bulkConnsRef[i]` is connIndex `bulkConnIndex(i)`.
+  const controlConnRef = useRef<WebrtcConnection | null>(null);
+  const bulkConnsRef = useRef<(WebrtcConnection | null)[]>(
+    new Array(BULK_CONNECTION_COUNT).fill(null),
+  );
   const latencySessionRef = useRef<LatencySession | null>(null);
   const runIdRef = useRef<string | null>(null);
   const selfRef = useRef<PeerInfo | null>(null);
@@ -290,9 +299,12 @@ export default function Room({ params }: Route.ComponentProps) {
 
   // Phase 4 (S5 gate, 4.4)
   const controlChannelRef = useRef<RTCDataChannel | null>(null);
-  // Indexed by the channel's parsed "bulk-N" label (04-throughput revision:
-  // parallel bulk channels) — a hole means that channel hasn't opened yet.
-  const bulkChannelsRef = useRef<(RTCDataChannel | null)[]>(new Array(BULK_CHANNEL_COUNT).fill(null));
+  // Indexed by bulk connection slot (0..BULK_CONNECTION_COUNT-1, matching
+  // `bulkConnsRef`) — a hole means that connection's channel hasn't opened
+  // yet.
+  const bulkChannelsRef = useRef<(RTCDataChannel | null)[]>(
+    new Array(BULK_CONNECTION_COUNT).fill(null),
+  );
   const testConfigRef = useRef<TestConfigPayload | null>(null);
   const latencyHandoffFiredRef = useRef(false);
   const latencyReadyRef = useRef(false);
@@ -359,7 +371,7 @@ export default function Room({ params }: Route.ComponentProps) {
           // already closing
         }
       }
-      webrtcRef.current?.teardown();
+      teardownAllConnections();
     }
 
     function sendEnvelope(envelope: Envelope) {
@@ -374,6 +386,51 @@ export default function Room({ params }: Route.ComponentProps) {
 
     function sendControlRaw(raw: string) {
       controlChannelRef.current?.send(raw);
+    }
+
+    function allConnections(): WebrtcConnection[] {
+      return [controlConnRef.current, ...bulkConnsRef.current].filter(
+        (c): c is WebrtcConnection => c !== null,
+      );
+    }
+
+    function teardownAllConnections() {
+      for (const conn of allConnections()) conn.teardown();
+    }
+
+    // The control connection's own `offer`/`answer`/`ice-candidate` messages
+    // carry `connIndex: CONTROL_CONN_INDEX`; each bulk connection's carry
+    // `bulkConnIndex(i)` — this is the inverse, used to route an inbound
+    // signaling message to the one instance among `BULK_CONNECTION_COUNT + 1`
+    // that originated the negotiation it's replying to.
+    function connectionForIndex(connIndex: number): WebrtcConnection | null {
+      if (connIndex === CONTROL_CONN_INDEX) return controlConnRef.current;
+      const bulkSlot = connIndex - CONTROL_CONN_INDEX - 1;
+      return bulkConnsRef.current[bulkSlot] ?? null;
+    }
+
+    // Aggregated across every connection the same way `TerminalController`
+    // combines two peers' `via` (4.4): RELAY if any one connection is
+    // relayed, else DIRECT if at least one is classified, else UNKNOWN. One
+    // relayed bulk connection among several direct ones still means real
+    // traffic crossed a relay, so the badge must not read as fully direct.
+    function recomputeConnectionType() {
+      const types = allConnections().map((c) => c.getConnectionType());
+      const type: ConnectionType = types.includes("RELAY")
+        ? "RELAY"
+        : types.includes("DIRECT")
+          ? "DIRECT"
+          : "UNKNOWN";
+      connectionTypeRef.current = type;
+      setConnectionType(type);
+    }
+
+    function handleConnectionFailure(reason: string) {
+      if (measurementStarted()) {
+        finalize({ kind: "local-abort", status: "FAILED", reason });
+      } else {
+        abortPreMeasurement(reason);
+      }
     }
 
     // Once the stage orchestrator exists, measurement has begun (4.4): every
@@ -434,7 +491,7 @@ export default function Room({ params }: Route.ComponentProps) {
         updatePhase("result");
         sendEnvelope({ type: "run-finished", runId: runIdRef.current!, payload: {} });
         lifecycleGraceTimerRef.current = setTimeout(() => {
-          webrtcRef.current?.teardown();
+          teardownAllConnections();
         }, LIFECYCLE_GRACE_MS);
       });
     }
@@ -493,20 +550,23 @@ export default function Room({ params }: Route.ComponentProps) {
     // `pairing` for the full profile-timeout window.
     async function safeGetOwnAddress() {
       try {
-        return (await webrtcRef.current?.getOwnAddress()) ?? {};
+        return (await controlConnRef.current?.getOwnAddress()) ?? {};
       } catch (err) {
         console.warn("getOwnAddress failed; continuing without it", err);
         return {};
       }
     }
 
+    // Each bulk connection's own callback closure already knows its slot
+    // (captured at construction time below), so opening no longer needs to
+    // recover an index from the channel label the way single-connection,
+    // multi-channel-per-connection did.
+    function handleBulkChannelOpen(bulkSlot: number, channel: RTCDataChannel) {
+      bulkChannelsRef.current[bulkSlot] = channel;
+      maybeStartStages();
+    }
+
     async function handleChannelOpen(label: ChannelLabel, channel: RTCDataChannel) {
-      if (label === "bulk") {
-        const index = bulkChannelIndex(channel.label);
-        if (index !== null) bulkChannelsRef.current[index] = channel;
-        maybeStartStages();
-        return;
-      }
       if (label !== "control" || !selfRef.current || !runIdRef.current) return;
       const runId = runIdRef.current;
       controlChannelRef.current = channel;
@@ -730,33 +790,54 @@ export default function Room({ params }: Route.ComponentProps) {
             maybeStartStages();
             break;
           case "ice-servers": {
-            if (!selfRef.current || !runIdRef.current || webrtcRef.current) break;
-            webrtcRef.current = new WebrtcConnection({
-              slot: selfRef.current.slot,
-              runId: runIdRef.current,
-              iceServers: envelope.payload.iceServers,
-              forceRelay: isForceRelayRequested(),
+            if (!selfRef.current || !runIdRef.current || controlConnRef.current) break;
+            const slot = selfRef.current.slot;
+            const runId = runIdRef.current;
+            const iceServers = envelope.payload.iceServers;
+            const forceRelay = isForceRelayRequested();
+
+            controlConnRef.current = new WebrtcConnection({
+              slot,
+              runId,
+              connIndex: CONTROL_CONN_INDEX,
+              role: "control",
+              iceServers,
+              forceRelay,
               send: sendEnvelope,
               callbacks: {
                 onConnectionStateChange: (state) => {
                   if (state === "connected") updatePhase("paired");
                 },
-                onConnectionTypeChange: (type) => {
-                  connectionTypeRef.current = type;
-                  setConnectionType(type);
-                },
-                onFailure: (reason) => {
-                  if (measurementStarted()) {
-                    finalize({ kind: "local-abort", status: "FAILED", reason });
-                  } else {
-                    abortPreMeasurement(reason);
-                  }
-                },
+                onConnectionTypeChange: recomputeConnectionType,
+                onFailure: handleConnectionFailure,
                 onChannelOpen: (label, channel) => void handleChannelOpen(label, channel),
                 onChannelMessage: handleChannelMessage,
                 onChannelClose: handleChannelClose,
               },
             });
+
+            // Genuine parallelism (04-throughput revision): each bulk
+            // channel gets its own RTCPeerConnection — its own ICE
+            // negotiation, DTLS session, and SCTP association/congestion
+            // window — rather than sharing the control connection's one.
+            for (let bulkSlot = 0; bulkSlot < BULK_CONNECTION_COUNT; bulkSlot++) {
+              bulkConnsRef.current[bulkSlot] = new WebrtcConnection({
+                slot,
+                runId,
+                connIndex: bulkConnIndex(bulkSlot),
+                role: "bulk",
+                iceServers,
+                forceRelay,
+                send: sendEnvelope,
+                callbacks: {
+                  onConnectionTypeChange: recomputeConnectionType,
+                  onFailure: handleConnectionFailure,
+                  onChannelOpen: (_label, channel) => handleBulkChannelOpen(bulkSlot, channel),
+                  onChannelMessage: handleChannelMessage,
+                  onChannelClose: handleChannelClose,
+                },
+              });
+            }
             break;
           }
           case "run-ended": {
@@ -780,9 +861,9 @@ export default function Room({ params }: Route.ComponentProps) {
                 clearTimeout(lifecycleGraceTimerRef.current);
                 lifecycleGraceTimerRef.current = null;
               }
-              webrtcRef.current?.teardown();
+              teardownAllConnections();
             } else {
-              webrtcRef.current?.teardown();
+              teardownAllConnections();
               enterTerminal(envelope.payload.reason);
             }
             break;
@@ -793,7 +874,7 @@ export default function Room({ params }: Route.ComponentProps) {
           case "offer":
           case "answer":
           case "ice-candidate":
-            webrtcRef.current?.handleSignalingMessage(envelope);
+            connectionForIndex(envelope.connIndex)?.handleSignalingMessage(envelope);
             break;
           default:
             break;
@@ -807,7 +888,7 @@ export default function Room({ params }: Route.ComponentProps) {
       if (lifecycleGraceTimerRef.current) clearTimeout(lifecycleGraceTimerRef.current);
       latencySessionRef.current?.reset();
       stageOrchestratorRef.current?.stop();
-      webrtcRef.current?.teardown();
+      teardownAllConnections();
       ws?.close();
     };
   }, [token, confirmedProfile]);
