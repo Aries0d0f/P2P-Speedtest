@@ -58,6 +58,52 @@ export function buildMetadata(roomId: string, peerId: string, hash: string): Res
   return { id: roomId, "peer-id": peerId, hash };
 }
 
+/** bits per second → Mbps, one decimal place. The only transformation
+ * Phase 5's UI is permitted to apply to a stored bandwidth edge (5.2) —
+ * everything else renders the schema's own fields as-is. */
+export function bpsToMbps(bitsPerSecond: number): string {
+  return (bitsPerSecond / 1_000_000).toFixed(1);
+}
+
+function edgeLine(edge: BandwidthEdge): string {
+  return `${bpsToMbps(edge.speed)} Mbps · ${edge.latency.toFixed(0)} ms · loss ${(edge.loss * 100).toFixed(2)}%`;
+}
+
+/**
+ * Shared copy-text builder for the room page's result state and the
+ * results detail page (5.5). Always names `data.via` and both bandwidth
+ * groups: an absent group reads as "not measured" rather than being
+ * omitted or printed as a zero, so a partial `FAILED`/`CANCELED` record
+ * never reads as a complete result with suspiciously few numbers.
+ */
+export function buildResultCopyText(data: ResultData): string {
+  const lines: string[] = [`P2P Speedtest result — ${data.status}`, `Connection: ${data.via}`];
+
+  for (const [label, edges] of [
+    ["Directional", data.bandwidth.directional],
+    ["Duplex", data.bandwidth.duplex],
+  ] as const) {
+    if (!edges || edges.length === 0) {
+      lines.push(`${label}: not measured`);
+      continue;
+    }
+    lines.push(`${label}:`);
+    for (const edge of edges) lines.push(`  ${edgeLine(edge)}`);
+  }
+
+  return lines.join("\n");
+}
+
+/**
+ * A `/results/:room/:peerId` link (5.5). Resolves only in a browser that
+ * already holds this exact record — export/import (5.3/5.4) is the actual
+ * cross-device portability path, so callers must show the local-only
+ * caveat alongside this rather than implying the link travels.
+ */
+export function buildResultLink(origin: string, room: string, peerId: string): string {
+  return `${origin}/results/${room}/${peerId}`;
+}
+
 // --- Assembly (4.4) ---------------------------------------------------
 
 export interface AssemblePeerInfo {
@@ -306,4 +352,193 @@ export async function listResults(): Promise<ListResultsOutcome> {
     }
   }
   return { status: "ok", results, warnings };
+}
+
+export type GetResultOutcome =
+  | { status: "ok"; result: P2PSpeedtestResult }
+  | { status: "not-found" }
+  | { status: "invalid"; errors: string[] }
+  | { status: "error"; reason: "open-failed" | "transaction-failed" };
+
+async function getRaw(
+  room: string,
+  peerId: string,
+): Promise<{ found: false } | { found: true; value: unknown } | { error: "open-failed" | "transaction-failed" }> {
+  let db: IDBDatabase;
+  try {
+    db = await openDb();
+  } catch {
+    return { error: "open-failed" };
+  }
+  return new Promise((resolve) => {
+    let tx: IDBTransaction;
+    try {
+      tx = db.transaction(STORE_NAME, "readonly");
+    } catch {
+      resolve({ error: "transaction-failed" });
+      return;
+    }
+    const req = tx.objectStore(STORE_NAME).get([room, peerId]);
+    req.onsuccess = () => {
+      const value = req.result as unknown;
+      db.close();
+      resolve(value === undefined ? { found: false } : { found: true, value });
+    };
+    req.onerror = () => {
+      db.close();
+      resolve({ error: "transaction-failed" });
+    };
+  });
+}
+
+/** Reads the single record for `[room, peerId]` — the out-of-line compound
+ * key every row is stored under (5.1). A record missing from this browser's
+ * store is `not-found`, never a crash; a present-but-malformed row is
+ * `invalid` rather than silently treated as absent, so the detail route can
+ * tell the two apart. */
+export async function getResult(room: string, peerId: string): Promise<GetResultOutcome> {
+  const raw = await getRaw(room, peerId);
+  if ("error" in raw) return { status: "error", reason: raw.error };
+  if (!raw.found) return { status: "not-found" };
+  const validation = await validateEnvelope(raw.value);
+  if (!validation.valid) return { status: "invalid", errors: validation.errors };
+  return { status: "ok", result: raw.value as P2PSpeedtestResult };
+}
+
+// --- Export (5.3) -------------------------------------------------------
+
+export interface ExportBundle {
+  results: P2PSpeedtestResult[];
+}
+
+export type BuildExportOutcome =
+  | { status: "ok"; bundle: ExportBundle }
+  | { status: "error"; reason: "open-failed" | "transaction-failed" };
+
+/** Builds the `{ results: [...] }` export shape — no separate top-level
+ * version wrapper, since every entry already carries its own `apiVersion`
+ * (5.3). Pure data assembly, kept apart from `downloadExportBundle` so it
+ * can be exercised without a DOM. */
+export async function buildExportBundle(keys?: Array<[string, string]>): Promise<BuildExportOutcome> {
+  const listed = await listResults();
+  if (listed.status === "error") return listed;
+  if (!keys) return { status: "ok", bundle: { results: listed.results } };
+
+  const wanted = new Set(keys.map(([room, peerId]) => `${room} ${peerId}`));
+  const results = listed.results.filter((r) => wanted.has(`${r.data.room} ${r.metadata["peer-id"]}`));
+  return { status: "ok", bundle: { results } };
+}
+
+/** Triggers a browser download of an already-built bundle. Never called
+ * outside a browser context. */
+export function downloadExportBundle(bundle: ExportBundle): void {
+  const blob = new Blob([JSON.stringify(bundle)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  try {
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "p2p-speedtest-results.json";
+    a.click();
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+/** All results by default, or a selection if `keys` names specific
+ * `[room, peerId]` identities (5.3). */
+export async function exportResults(keys?: Array<[string, string]>): Promise<BuildExportOutcome> {
+  const outcome = await buildExportBundle(keys);
+  if (outcome.status === "ok") downloadExportBundle(outcome.bundle);
+  return outcome;
+}
+
+// --- Import (5.4) --------------------------------------------------------
+
+const SUPPORTED_API_VERSION = "sws.aries0d0f.me/v1";
+
+export type ImportEntryOutcome =
+  | { status: "saved" }
+  | { status: "deduplicated" }
+  | { status: "malformed"; message: string }
+  | { status: "unsupported-version"; message: string }
+  | { status: "invalid"; errors: string[] }
+  | { status: "save-error"; reason: string };
+
+export interface ImportEntryResult {
+  index: number;
+  outcome: ImportEntryOutcome;
+}
+
+export type ImportResultsOutcome =
+  | { status: "malformed-file" }
+  | { status: "ok"; entries: ImportEntryResult[] };
+
+function hasStringApiVersionAndKind(value: unknown): value is { apiVersion: string; kind: string } {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return typeof v.apiVersion === "string" && typeof v.kind === "string";
+}
+
+/**
+ * Imports an exported `{ results: [...] }` file (5.4). The outer shape is
+ * the only fatal case — a malformed or missing `results` array aborts
+ * before touching storage. Every entry inside it is then handled
+ * independently, in order: a missing/malformed `apiVersion`/`kind` is
+ * skipped as malformed, an unsupported `apiVersion` is skipped by name
+ * (never coerced into this version's shape), and everything else goes
+ * through `validateEnvelope` — schema, semantics, identity, then checksum —
+ * before `saveResult` applies Phase 4's transactional first-write-wins
+ * merge. One bad entry never aborts the rest of the file.
+ */
+export async function importResults(file: File): Promise<ImportResultsOutcome> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await file.text());
+  } catch {
+    return { status: "malformed-file" };
+  }
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    !Array.isArray((parsed as Record<string, unknown>).results)
+  ) {
+    return { status: "malformed-file" };
+  }
+
+  const rawEntries = (parsed as { results: unknown[] }).results;
+  const entries: ImportEntryResult[] = [];
+
+  for (let index = 0; index < rawEntries.length; index++) {
+    const entry = rawEntries[index];
+
+    if (!hasStringApiVersionAndKind(entry)) {
+      entries.push({ index, outcome: { status: "malformed", message: "missing or malformed apiVersion/kind" } });
+      continue;
+    }
+    if (entry.apiVersion !== SUPPORTED_API_VERSION) {
+      entries.push({
+        index,
+        outcome: {
+          status: "unsupported-version",
+          message: `entry uses ${entry.apiVersion}, not supported by this version`,
+        },
+      });
+      continue;
+    }
+
+    const validation = await validateEnvelope(entry);
+    if (!validation.valid) {
+      entries.push({ index, outcome: { status: "invalid", errors: validation.errors } });
+      continue;
+    }
+
+    const saveOutcome = await saveResult(entry as P2PSpeedtestResult);
+    if (saveOutcome.status === "error") {
+      entries.push({ index, outcome: { status: "save-error", reason: saveOutcome.reason } });
+    } else {
+      entries.push({ index, outcome: { status: saveOutcome.status } });
+    }
+  }
+
+  return { status: "ok", entries };
 }
