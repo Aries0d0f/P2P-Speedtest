@@ -155,9 +155,12 @@ export async function validateEnvelope(entry: unknown): Promise<ValidationResult
     errors.push(`metadata.peer-id must appear exactly once in data.peers (found ${occurrences})`);
   }
 
+  // Phrased as corruption, not provenance (S6, 5.4): a matching checksum
+  // never establishes that a record was produced by this app, so a mismatch
+  // must not be read as "not produced by this app" either — only as damage.
   const expectedHash = await computeResultHash(value.data);
   if (expectedHash !== value.metadata.hash) {
-    errors.push("metadata.hash does not match the checksum of data");
+    errors.push("metadata.hash checksum mismatch — this entry is corrupted");
   }
 
   return errors.length > 0 ? fail(...errors) : ok();
