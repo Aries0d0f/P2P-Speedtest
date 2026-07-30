@@ -24,6 +24,53 @@ describe("fetchGeo", () => {
     });
   });
 
+  it("unwraps the endpoint's { ip, protocol, geo } envelope", async () => {
+    // The real response shape. Reading `lat`/`lon` off the top level found
+    // nothing, so every lookup returned null and every peer looked as though
+    // it had withheld its location regardless of privacy level.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ip: "1.161.11.102",
+              protocol: "IPv4",
+              geo: {
+                status: "success",
+                country: "Taiwan",
+                countryCode: "TW",
+                city: "New Taipei City",
+                lat: 25.0693,
+                lon: 121.4626,
+                proxy: false,
+                hosting: false,
+              },
+            }),
+            { status: 200 },
+          ),
+      ),
+    );
+
+    const geo = await fetchGeo();
+    expect(geo).not.toBeNull();
+    expect(geo!.lat).toBe(25.0693);
+    expect(geo!.lon).toBe(121.4626);
+    expect(geo!.city).toBe("New Taipei City");
+    // `status` and the envelope's own fields are not schema-known and are
+    // dropped by the same sanitizer as before.
+    expect(geo).not.toHaveProperty("status");
+    expect(geo).not.toHaveProperty("ip");
+  });
+
+  it("returns null when the envelope carries no usable geo", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ ip: "1.2.3.4", protocol: "IPv4" }), { status: 200 })),
+    );
+    expect(await fetchGeo()).toBeNull();
+  });
+
   it("never throws — returns null on a non-2xx response", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 500 })));
     expect(await fetchGeo()).toBeNull();

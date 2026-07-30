@@ -79,6 +79,25 @@ export function sanitizeGeo(data: unknown): GeoInfo | null {
   return Object.keys(result).length > 0 ? result : null;
 }
 
+/**
+ * The endpoint answers with an envelope, not a bare `GeoInfo`:
+ *
+ *     { "ip": "…", "protocol": "IPv4", "geo": { "lat": …, "lon": …, … } }
+ *
+ * `sanitizeGeo` reads its fields from the top level, so handing it the
+ * envelope silently produced `null` for every lookup — every peer looked as
+ * though it had withheld its location whatever its privacy level. The flat
+ * form is still accepted so a change at either end degrades rather than
+ * breaks.
+ */
+function unwrapGeoPayload(data: unknown): unknown {
+  if (typeof data === "object" && data !== null) {
+    const nested = (data as Record<string, unknown>).geo;
+    if (typeof nested === "object" && nested !== null) return nested;
+  }
+  return data;
+}
+
 export async function fetchGeo(): Promise<GeoInfo | null> {
   try {
     const resp = await fetch(GEO_ENDPOINT, {
@@ -87,7 +106,7 @@ export async function fetchGeo(): Promise<GeoInfo | null> {
       }
     });
     if (!resp.ok) return null;
-    return sanitizeGeo(await resp.json());
+    return sanitizeGeo(unwrapGeoPayload(await resp.json()));
   } catch {
     return null;
   }
