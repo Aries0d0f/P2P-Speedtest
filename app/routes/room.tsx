@@ -3,6 +3,7 @@ import { BsCopy } from "react-icons/bs";
 import { useLocation } from "react-router";
 import { ConnectionBadge } from "~/components/ConnectionBadge";
 import { ProfileFields } from "~/components/ProfileFields";
+import { QrCode } from "~/components/QrCode";
 import { ShareActions } from "~/components/ShareActions";
 import type { GeoInfo } from "~/lib/geo";
 import { fetchGeo } from "~/lib/geo";
@@ -942,6 +943,9 @@ export default function Room({ params }: Route.ComponentProps) {
         Emoji key
       </p>
       <p className="text-2xl">{emojiKey}</p>
+      <div className="flex justify-center">
+        <QrCode value={link} />
+      </div>
       <p className="break-all text-xs text-gray-500 dark:text-gray-400">{link}</p>
     </section>
   );
