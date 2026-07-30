@@ -3,6 +3,7 @@ import { BsCopy } from "react-icons/bs";
 import { useLocation } from "react-router";
 import { ConnectionBadge } from "~/components/ConnectionBadge";
 import { ProfileFields } from "~/components/ProfileFields";
+import { ShareActions } from "~/components/ShareActions";
 import type { GeoInfo } from "~/lib/geo";
 import { fetchGeo } from "~/lib/geo";
 import {
@@ -174,7 +175,9 @@ function ResultSummary({
           ))}
         </div>
       )}
-      {!outcome.record && (
+      {outcome.record ? (
+        <ShareActions result={outcome.record} />
+      ) : (
         <p className="text-xs text-gray-500 dark:text-gray-400">
           The result couldn't be saved on this device.
         </p>

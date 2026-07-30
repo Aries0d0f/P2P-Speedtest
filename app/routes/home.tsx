@@ -1,5 +1,5 @@
 import { useState, useEffect, type SubmitEvent } from "react";
-import { useNavigate } from "react-router";
+import { Link, useNavigate } from "react-router";
 import { ProfileFields } from "~/components/ProfileFields";
 import {
   defaultProfile,
@@ -160,6 +160,13 @@ export default function Home() {
             </p>
           )}
         </section>
+
+        <Link
+          to="/results"
+          className="self-center text-sm text-gray-500 underline dark:text-gray-400"
+        >
+          View past results
+        </Link>
       </div>
     </main>
   );
