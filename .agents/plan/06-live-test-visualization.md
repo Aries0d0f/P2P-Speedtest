@@ -765,6 +765,193 @@ receive/send color interpretation, desktop 23.44-degree presentation, and
 mobile self-left/peer-right rule have been reviewed; do not mark the overall
 product complete until the 6.6 evidence log is filled.
 
+## Implementation record (2026-07-30)
+
+### What was built
+
+| Step | Files |
+|---|---|
+| 6.0 | `vitest.config.ts` (workers + jsdom projects), `test/setup-dom.ts`; `three`/`animejs` moved to `dependencies` |
+| 6.1 | `app/lib/test-visualization.ts`, `.test.ts` (37 tests) |
+| 6.2 | `app/lib/globe-math.ts`, `.test.ts` (62 tests); `scripts/build-land-mask.mjs`; `app/assets/world-land-mask.png` + `README.md`; `app/components/speedtest/three/globe-scene.ts`, `create-globe-scene.ts`, `PeerGlobe.tsx` |
+| 6.3 | orientation/route/particles in `create-globe-scene.ts`; `PeerGlobe.test.tsx` (18 tests) |
+| 6.4 | `app/lib/speed-series.ts`, `.test.ts` (24 tests); `anime-scalar.ts`, `RealtimeSpeedGraph.tsx`, `SpeedGauge.tsx`, `SpeedWidgets.test.tsx`, `SpeedWidgets.anime.test.tsx` |
+| 6.5 | `LiveTestDashboard.tsx`, `LiveVisualizationBoundary.tsx`, `use-reduced-motion.ts`, their tests; `app/routes/room.tsx`, `app/app.css` |
+| 6.6 | `app/routes/dev.live-view.tsx`, registered from `app/routes.ts` only outside production |
+
+### Deviations from the plan, and why
+
+- **Adaptive camera distance.** The plan asserts that facing the arc midpoint
+  "places both endpoints in the visible hemisphere for every non-antipodal
+  pair". That holds for the geometric hemisphere but not for a *perspective*
+  camera, whose horizon sits at `z = 1/d`: a Sydney↔Berlin pair (≈145°) falls
+  behind it at a fixed distance. `recommendedCameraDistance()` now derives the
+  distance from the pair's separation, clamped to [2.6, 9]. Beyond ≈166° the
+  two markers genuinely cannot share a frame and the camera stops receding
+  rather than flying away.
+- **`niceCeiling` carries no built-in headroom.** With the planned 15% pad,
+  180 Mbps landed on a 500 Mbps axis. The ceiling is now the smallest 1/2/5
+  decade at or above the value, and the graph reserves its own top margin.
+- **Land mask source.** Natural Earth's CDN serves only the current release
+  and cannot be pinned to 4.0.0, so the GeoJSON is fetched from the upstream
+  `natural-earth-vector` repository at its `v4.0.0` tag, with the checksum
+  verified on every regeneration. Provenance is in `app/assets/README.md`.
+- **A globe failure escalates to the boundary.** `PeerGlobe` also degrades
+  locally, but the route treats `onVisualError` as a signal to show the
+  single "visualization unavailable" panel, exactly as 6.5 specifies.
+- **SSR.** The app is `ssr: false` (SPA mode, only `/` pre-rendered), so the
+  planned "SSR renders the same stable globe shell" reduces to: no route ever
+  server-renders the dashboard, and nothing can mismatch. Verified instead by
+  chunk analysis — see below.
+
+### Fixed after the first real two-browser run (2026-07-30)
+
+- **Every peer read "location not shared", whatever its privacy level.** Not a
+  Phase 6 bug: `fetchGeo()` handed the endpoint's whole envelope —
+  `{ ip, protocol, geo: { lat, lon, … } }` — to `sanitizeGeo()`, which reads
+  its fields from the top level, so every lookup had always returned `null`.
+  Nothing before this phase displayed geo prominently enough for it to show.
+  `geo.ts` now unwraps the nested object (and still accepts a flat one);
+  `geo.test.ts` covers the real response shape, which the old flat-payload
+  test never did.
+- **The graph's x-axis is now time *within a stage*, not within the run.**
+  Laying the three stages out end to end spent most of the plot on the gaps
+  between them and made the comparison a viewer actually wants — how the
+  stages ramp against each other — impossible by eye. Each series now carries
+  its own `originMs` and starts at zero, so the three overlay. They remain
+  separate polylines, so the no-misleading-diagonal rule from 6.4 still holds,
+  and `spanMs` is the longest single stage rather than the whole run.
+
+### Widened after review: the globe is not testing-only
+
+The plan mounted the dashboard for "the measurement portion of `testing`".
+In practice that wasted the two screens where the globe is most welcome — the
+waiting room, and the result — so it is now mounted for the whole non-terminal
+life of the room and on the stored-result page.
+
+The dashboard configures itself from the presentation rather than taking a
+mode from its caller, which is what lets one lazy chunk serve every case:
+
+| when | globe | graph | gauge |
+|---|---|---|---|
+| waiting / pairing / paired | yes | — | — |
+| testing | yes | yes | yes |
+| finalizing | yes | yes | frozen |
+| result | yes | run history | — |
+| stored result page | yes | — | — |
+
+Two supporting changes:
+
+- **`finalizing` now keeps the last stage's channels.** The selector was
+  clearing them, so the gauge blanked mid-sentence instead of freezing on its
+  final reading as 6.5 requires. `active` (which stops the particles) and
+  `stageId` (which keeps the numbers) are now separate conditions.
+- **`selectStoredResultPresentation()`** builds the same presentation from a
+  stored record — `data.peers[].geo` already carries `lat`/`lon`. The results
+  detail page draws the globe only when at least one peer shared a location;
+  the history list never loads the chunk at all.
+
+### Immersive full-screen canvas
+
+The canvas is now a fixed, viewport-sized layer behind the page rather than a
+box in the flow. Two pieces make that work without changing anything else:
+
+- **A placeholder** holds the layout space the canvas vacated — the same
+  `aspect-square w-full sm:aspect-[4/3]` box as before, so no surrounding
+  layout moved.
+- **The globe keeps its pixel size.** `resize()` takes the placeholder's
+  height as a reference and widens the field of view in step with the canvas:
+  a sphere's projected half-height is `p = (r/d)·H / (2·tan(fov/2))`, so
+  holding `H / tan(fov/2)` constant holds `p` constant. Filling the screen
+  therefore adds *space around* the globe instead of magnifying it.
+  `gl_PointSize`'s `uScale` keys off the same reference for the same reason.
+  Verified numerically: 768×576 at 38° and 1440×900 at the derived 56.4° both
+  project the globe to a 348 px half-height.
+
+The placeholder also remains the style host and the box that decides the
+quality tier and the desktop/mobile orientation contract — a phone-width
+placeholder inside a wide window still gets the mobile layout.
+
+Content now sits over the globe, so panels carry a `.surface-panel`
+backdrop (translucent + blur) rather than being transparent over a moving
+point cloud.
+
+**Stacking, and the mistake worth recording.** The layer was first given
+`-z-10`, which made the globe invisible. `app.css` sets the background on
+`html, body`: `html`'s propagates to the canvas, so `body` keeps its own and
+paints it as an ordinary block background — CSS 2.1 painting step 3, *after*
+negative-z-index children in step 2. The globe was drawn and then covered.
+
+Nor is moving the layer first enough on its own: a `position: fixed` element
+paints in step 6, and non-positioned blocks paint in step 3, so document order
+between them is never consulted.
+
+What works, and what is implemented, is to make both sides positioned and let
+document order decide:
+
+- `PeerGlobe` portals the layer to the front of `<body>` via a
+  `[data-globe-layer-host]` div.
+- The routes that host a globe mark their `<main>` `relative`.
+
+Both are then step-6 participants with `z-index: auto`, and the layer — first
+in the document — paints underneath. No z-index anywhere. The coupling is
+invisible from inside the component, so a development-only check warns when
+`<main>` computes to `position: static`.
+
+*Unmeasured consequence:* the back buffer is now viewport-sized — 1440×900 at
+DPR 2 is ~5.2 Mpx against ~1.6 Mpx before. Most of the extra area is empty
+sky (discarded point fragments), so the shading cost should be close to flat,
+but this lands squarely in the 6.6 A/B throughput check that has not been run.
+If that check shows the visualization perturbing the measurement, `maxPixelRatio`
+in `QUALITY` is the first dial to turn.
+
+### Verified
+
+- `bun run test` — 394 passing. The 6 failures in
+  `workers/signaling-room.test.ts` are **pre-existing and unrelated**: the
+  identical six fail on a clean checkout of `574ffe0` (verified by stashing).
+- `bun run typecheck` — clean.
+- `bun run build` — succeeds.
+- **Chunk isolation** (from the production build's emitted chunks): `home`,
+  `results`, `results.$room.$peerId` and `room` statically import neither the
+  dashboard nor the globe scene; `room` reaches `LiveTestDashboard` only
+  through `import()`, and only `LiveTestDashboard` reaches
+  `create-globe-scene`. No eagerly loaded chunk contains Three.js.
+- **Visualization chunk size**: 152.9 KiB gzip of JS
+  (`create-globe-scene` 132.8, `animation` 10.4, `LiveTestDashboard` 6.0,
+  `targets` 2.1, `svg` 1.2, rest <0.4) plus the 10.9 KiB land mask =
+  **163.8 KiB**, against the 250 KiB target.
+- **Dev harness is not in production**: no `dev.live-view` chunk is emitted by
+  `react-router build`; the route serves in `bun run dev`.
+- **Land mask orientation**: nine known land/ocean probe points are asserted
+  by the generator itself, and the rendered mask was inspected directly.
+
+### Not verified — real-browser work remains
+
+Everything below needs a human at a browser; none of it can be done from this
+environment, which has no GPU, no browser automation, and no second device.
+
+- [ ] Desktop Chrome / Firefox / Safari at 1440×900, and iOS Safari / Android
+      Chrome. Nothing in the Three.js scene has *ever* executed: jsdom has no
+      WebGL, so `PeerGlobe.test.tsx` exercises the lifecycle around an
+      injected fake scene, and `create-globe-scene.ts` is covered only by
+      typecheck and the pure math it calls.
+- [ ] Frame rate, long tasks, draw calls, GPU resource counts across
+      StrictMode remount / stage changes / hide-resume / context loss.
+- [ ] The A/B check that a high-speed local test measures the same with the
+      visualization enabled and disabled. **This is the one that can invalidate
+      a design decision rather than just a polish detail** — if the scene
+      perturbs throughput, lower the quality tiers before sign-off.
+- [ ] Screenshots for the 23.44° desktop tilt, mobile self-left/peer-right in
+      both orientations, and all three transfer colours.
+- [ ] Screen-reader and keyboard pass; colour-vision-removed check.
+- [ ] Colour token contrast against the final surfaces.
+
+`/dev/live-view` exists to make all of the above repeatable: it drives the
+real dashboard through both slots, every stage, fixed speeds, and the
+awkward geographies (date line, antipodal, shared location, one peer hidden,
+stale run) with no room and no test traffic.
+
 ## Review Feedback (Codex, 2026-07-29)
 
 ### Review State
