@@ -13,3 +13,61 @@ body {
     color-scheme: dark;
   }
 }
+
+/*
+ * Semantic transfer colours (S11, 06-live-test-visualization). Defined here
+ * once and only once: the SVG graph and gauge use them through `var()`, and
+ * the Three.js scene reads the *computed* value so the globe follows the
+ * light/dark theme instead of carrying a second palette.
+ *
+ * Meaning is local to this browser, never to a slot — the same physical
+ * transfer is send/violet on one screen and receive/cyan on the other.
+ * Colour is never the sole distinction: every channel is also named and
+ * carries an arrow, and the two duplex traces differ in solid/dashed.
+ */
+:root {
+  --transfer-receive: #0e7490; /* cyan-700  — this browser is receiving */
+  --transfer-send: #6d28d9; /* violet-700 — this browser is sending   */
+  --transfer-duplex: #047857; /* emerald-700 — both directions at once */
+  --transfer-idle: #64748b; /* slate-500  — no transfer in progress  */
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --transfer-receive: #22d3ee; /* cyan-400    */
+    --transfer-send: #a78bfa; /* violet-400  */
+    --transfer-duplex: #34d399; /* emerald-400 */
+    --transfer-idle: #94a3b8; /* slate-400   */
+  }
+}
+
+/*
+ * Content sits over the fixed, full-screen globe layer, so every panel needs
+ * a surface of its own or its text competes with a rotating point cloud.
+ * Translucent rather than opaque: the globe stays visible around and behind
+ * the reading material, which is the whole point of the immersive layout.
+ */
+.surface-panel {
+  background-color: color-mix(in srgb, white 78%, transparent);
+  backdrop-filter: blur(8px);
+}
+
+@media (prefers-color-scheme: dark) {
+  .surface-panel {
+    /* gray-950 */
+    background-color: color-mix(in srgb, #030712 72%, transparent);
+  }
+}
+
+/* `prefers-reduced-motion` is honoured in the components themselves (the
+ * globe snaps, Anime.js writes final values synchronously); this is the
+ * backstop for anything CSS-driven inside the dashboard. */
+@media (prefers-reduced-motion: reduce) {
+  [data-live-dashboard] *,
+  [data-live-dashboard] *::before,
+  [data-live-dashboard] *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
