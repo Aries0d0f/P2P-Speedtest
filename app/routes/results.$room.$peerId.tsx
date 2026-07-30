@@ -1,7 +1,11 @@
-import { useEffect, useState } from "react";
+import { Suspense, lazy, useEffect, useState } from "react";
 import { Link } from "react-router";
 import { ConnectionBadge } from "~/components/ConnectionBadge";
 import { ShareActions } from "~/components/ShareActions";
+import {
+  LiveVisualizationBoundary,
+  VisualizationPending,
+} from "~/components/speedtest/LiveVisualizationBoundary";
 import type { GeoInfo } from "~/lib/geo";
 import {
   bpsToMbps,
@@ -10,12 +14,21 @@ import {
   type P2PSpeedtestResult,
   type ResultPeer,
 } from "~/lib/results";
+import { selectStoredResultPresentation } from "~/lib/test-visualization";
 
 import type { Route } from "./+types/results.$room.$peerId";
 
 export function meta({}: Route.MetaArgs) {
   return [{ title: "P2P Speedtest — Result" }];
 }
+
+/**
+ * The same globe the run itself showed, rebuilt from the stored record. Lazy
+ * for the same reason as in the room: a visitor reading a text result never
+ * downloads Three.js until this page decides to draw one, and the history
+ * list never does at all.
+ */
+const LiveTestDashboard = lazy(() => import("~/components/speedtest/LiveTestDashboard"));
 
 // Client-only storage (5.1) — see results.tsx for why "loading" is the
 // stable SSR/first-paint state.
@@ -108,8 +121,11 @@ export default function ResultDetail({ params }: Route.ComponentProps) {
     };
   }, [room, peerId]);
 
+  // `relative`: see the note in room.tsx — the globe layer is a fixed element
+  // portalled to the front of <body>, so the page has to be positioned too for
+  // document order, rather than a z-index, to put it on top.
   return (
-    <main className="flex min-h-screen flex-col items-center gap-6 px-4 py-16">
+    <main className="relative flex min-h-screen flex-col items-center gap-6 px-4 py-16">
       <Link to="/results" className="text-sm text-gray-500 underline dark:text-gray-400">
         ← All results
       </Link>
@@ -154,6 +170,25 @@ export default function ResultDetail({ params }: Route.ComponentProps) {
                 <p className="text-base font-medium text-gray-900 dark:text-gray-100">{data.status}</p>
                 <ConnectionBadge type={data.via} />
               </section>
+
+              {/* Only worth drawing when at least one peer shared a
+                  location; two peers who both withheld theirs would get an
+                  empty globe and a pair of "not shared" lines they can
+                  already read below. */}
+              {data.peers.some((peer) => peer.geo?.lat !== undefined) && (
+                <LiveVisualizationBoundary resetKey={`${metadata.id}:${metadata["peer-id"]}`}>
+                  <Suspense fallback={<VisualizationPending />}>
+                    <LiveTestDashboard
+                      presentation={selectStoredResultPresentation({
+                        runId: `${metadata.id}:${metadata["peer-id"]}`,
+                        peers: [data.peers[0], data.peers[1]],
+                        localPeerId: metadata["peer-id"],
+                        connectionType: data.via,
+                      })}
+                    />
+                  </Suspense>
+                </LiveVisualizationBoundary>
+              )}
 
               <section className="flex flex-col gap-3">
                 <h2 className="text-sm font-medium text-gray-700 dark:text-gray-200">Peers</h2>
