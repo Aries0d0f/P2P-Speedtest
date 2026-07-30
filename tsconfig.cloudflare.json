@@ -6,6 +6,7 @@
     "app/**/.server/**/*",
     "app/**/.client/**/*",
     "workers/**/*",
+    "test/**/*",
     "worker-configuration.d.ts"
   ],
   "compilerOptions": {
