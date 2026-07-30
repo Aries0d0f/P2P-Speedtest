@@ -559,4 +559,95 @@ describe("TerminalController (two linked peers)", () => {
     // CANCELED still escalates the outcome even though it arrived after "clean".
     expect(o1.status).toBe("FAILED"); // no peer share ever arrives -> forced FAILED regardless
   });
+
+  // 5.6 robustness matrix row: "Duplicate result-share | ignored | one entry only".
+  it("a duplicate result-share is ignored — only the first is kept", async () => {
+    // Deliberately missing this peer's view of the other slot's edges, so
+    // the merge in `run()` has to pull them from the share rather than an
+    // already-banked, already-acknowledged entry.
+    const partialBank = (): StageBankEntry[] => [
+      { stageId: 1, receiverSlot: 0, measurement: measurement(2) },
+      { stageId: 2, receiverSlot: 0, measurement: measurement(3) },
+    ];
+    const a = new TerminalController({
+      runId: RUN_ID,
+      room: ROOM,
+      timestamp: TIMESTAMP,
+      selfSlot: 0,
+      selfPeerId: PEER_A_ID,
+      send: () => {},
+      freezeStages: partialBank,
+      getConnectionType: () => "DIRECT",
+      getPeers: peers,
+    });
+
+    const first: ResultSharePayload = {
+      status: "SUCCEED",
+      directional: measurement(100),
+      duplex: measurement(101),
+      via: "DIRECT",
+    };
+    const second: ResultSharePayload = {
+      status: "SUCCEED",
+      directional: measurement(200),
+      duplex: measurement(201),
+      via: "DIRECT",
+    };
+    a.handleResultShare(first);
+    a.handleResultShare(second);
+
+    const outcome = await a.trigger({ kind: "clean" });
+    expect(outcome.status).toBe("SUCCEED");
+    const download = outcome.record?.data.bandwidth.directional?.find((e) => e.to === PEER_B_ID);
+    const duplexFromB = outcome.record?.data.bandwidth.duplex?.find((e) => e.to === PEER_B_ID);
+    // bytes = 1_000_000 + n, durationMs = 1000 -> speed = bytes * 8.
+    expect(download?.speed).toBe((1_000_000 + 100) * 8);
+    expect(duplexFromB?.speed).toBe((1_000_000 + 101) * 8);
+  });
+
+  // 5.6 robustness matrix row: "Share lost in one direction only | both
+  // assemble | yes, both — checksums differ".
+  it("a result-share lost in one direction still lets both sides assemble, with differing checksums", async () => {
+    let a!: TerminalController;
+    const b = new TerminalController({
+      runId: RUN_ID,
+      room: ROOM,
+      timestamp: TIMESTAMP,
+      selfSlot: 1,
+      selfPeerId: PEER_B_ID,
+      send: () => {}, // B's own share never reaches A — the one-direction loss
+      freezeStages: fullBank,
+      getConnectionType: () => "DIRECT",
+      getPeers: peers,
+    });
+    a = new TerminalController({
+      runId: RUN_ID,
+      room: ROOM,
+      timestamp: TIMESTAMP,
+      selfSlot: 0,
+      selfPeerId: PEER_A_ID,
+      send: (raw) => {
+        const msg = decodeStageMessage(raw, RUN_ID);
+        if (msg?.type === "result-share") b.handleResultShare(msg.payload as ResultSharePayload);
+      },
+      freezeStages: fullBank,
+      getConnectionType: () => "DIRECT",
+      getPeers: peers,
+    });
+
+    const p1 = a.trigger({ kind: "clean" });
+    const p2 = b.trigger({ kind: "clean" });
+    await vi.advanceTimersByTimeAsync(5_000); // a waits the full deadline for b's share, which never arrives
+    const [outcomeA, outcomeB] = await Promise.all([p1, p2]);
+
+    // A never received B's share, so its own record is honestly forced to
+    // FAILED (S6) even though its own measurements all succeeded; B did
+    // receive A's share, so B's own SUCCEED stands. Both still assemble and
+    // (would) save a record — an honest disagreement, not corruption.
+    expect(outcomeA.status).toBe("FAILED");
+    expect(outcomeB.status).toBe("SUCCEED");
+    expect(outcomeA.record).not.toBeNull();
+    expect(outcomeB.record).not.toBeNull();
+    expect(outcomeA.record?.metadata.hash).not.toBe(outcomeB.record?.metadata.hash);
+  });
 });
