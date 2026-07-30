@@ -1,10 +1,18 @@
-import { useEffect, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BsCopy } from "react-icons/bs";
 import { useLocation } from "react-router";
 import { ConnectionBadge } from "~/components/ConnectionBadge";
 import { ProfileFields } from "~/components/ProfileFields";
 import { QrCode } from "~/components/QrCode";
 import { ShareActions } from "~/components/ShareActions";
+import {
+  LiveVisualizationBoundary,
+  VisualizationPending,
+} from "~/components/speedtest/LiveVisualizationBoundary";
+import {
+  selectLiveTestPresentation,
+  type LiveTestRoomView,
+} from "~/lib/test-visualization";
 import type { GeoInfo } from "~/lib/geo";
 import { fetchGeo } from "~/lib/geo";
 import {
@@ -72,6 +80,14 @@ interface TerminalState {
 }
 
 const USER_AGENT = typeof navigator !== "undefined" ? navigator.userAgent : "";
+
+/**
+ * Phase 6's optional live visualization. Lazy so the Three.js, Anime.js and
+ * land-mask chunks are fetched only by a browser that actually reaches
+ * `testing` — the home and results routes never download them. It is mounted
+ * as a *sibling* of the core test panel below, never as its parent.
+ */
+const LiveTestDashboard = lazy(() => import("~/components/speedtest/LiveTestDashboard"));
 
 // A missing/invalid initial profile must not strand the room forever —
 // this bounds how long `pairing` waits before treating it as a failure
@@ -275,8 +291,19 @@ export default function Room({ params }: Route.ComponentProps) {
   // but no usable aggregate came out of it (< 3 samples).
   const [latencyBaseline, setLatencyBaseline] = useState<Aggregate | null | undefined>(undefined);
   const [currentStage, setCurrentStage] = useState<StageId | null>(null);
-  const [stageProgress, setStageProgress] = useState<Record<string, StageProgressSnapshot>>({});
+  // Tagged with the run it belongs to, so the visualization selector can drop
+  // a bank retained across a run change instead of animating stale numbers.
+  const [stageProgress, setStageProgress] = useState<{
+    runId: string | null;
+    entries: Record<string, StageProgressSnapshot>;
+  }>({ runId: null, entries: {} });
   const [terminalResult, setTerminalResult] = useState<TerminalOutcome | null>(null);
+  const [runId, setRunId] = useState<string | null>(null);
+  // The profile *as sent* — already privacy-filtered — so this browser's own
+  // globe marker uses exactly the coordinates the other peer received, and
+  // both screens agree on which markers exist (S3, S11).
+  const [selfProfile, setSelfProfile] = useState<PeerProfileMessage | null>(null);
+  const [visualFailed, setVisualFailed] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   // 04-throughput revision: genuine parallelism needs independent SCTP
@@ -526,7 +553,14 @@ export default function Room({ params }: Route.ComponentProps) {
         callbacks: {
           onStageStarted: (stage) => setCurrentStage(stage),
           onProgress: (snapshot) =>
-            setStageProgress((prev) => ({ ...prev, [edgeKey(snapshot.stageId, snapshot.receiverSlot)]: snapshot })),
+            setStageProgress((prev) => {
+              const currentRun = runIdRef.current;
+              const entries = prev.runId === currentRun ? prev.entries : {};
+              return {
+                runId: currentRun,
+                entries: { ...entries, [edgeKey(snapshot.stageId, snapshot.receiverSlot)]: snapshot },
+              };
+            }),
           onStagesDone: () => finalize({ kind: "clean" }),
           onTimeout: () => finalize({ kind: "local-abort", status: "FAILED", reason: "stage-timeout" }),
         },
@@ -624,6 +658,7 @@ export default function Room({ params }: Route.ComponentProps) {
         selfRef.current.slot,
       );
       selfProfileRef.current = initial;
+      setSelfProfile(initial);
       if (initial.timestamp) runTimestampRef.current = initial.timestamp; // slot 0 only (S6)
       try {
         channel.send(encodeProfileEnvelope(runId, initial));
@@ -649,6 +684,7 @@ export default function Room({ params }: Route.ComponentProps) {
           geo,
         );
         selfProfileRef.current = enrichment;
+        setSelfProfile(enrichment);
         channel.send(encodeProfileEnvelope(runId, enrichment));
       } catch (err) {
         console.warn("profile enrichment failed", err);
@@ -770,6 +806,7 @@ export default function Room({ params }: Route.ComponentProps) {
             break;
           case "run-started": {
             runIdRef.current = envelope.runId;
+            setRunId(envelope.runId);
             updatePhase("pairing");
             const otherPeer = envelope.payload.peers.find(
               (p) => p.slot !== selfRef.current?.slot,
@@ -897,6 +934,54 @@ export default function Room({ params }: Route.ComponentProps) {
     };
   }, [token, confirmedProfile]);
 
+  // --- Phase 6 presentation boundary ---------------------------------------
+  // One pure snapshot, recomputed only when the room state it reads changes.
+  // Everything animated downstream sees this and nothing else: no channel, no
+  // orchestrator, no timer, no sender-side byte counter.
+  const localSlot = self?.slot ?? null;
+  const presentation = useMemo(() => {
+    const view: LiveTestRoomView = {
+      runId,
+      phase,
+      stageId: currentStage,
+      progressRunId: stageProgress.runId,
+      progress: stageProgress.entries,
+      liveLatency,
+      latencyBaseline,
+      connectionType,
+      // `selfProfile` is the post-privacy-filter message this browser sent,
+      // so an Anonymous peer shows no marker on either screen.
+      localProfile: selfProfile ? { name: selfProfile.name, geo: selfProfile.geo } : null,
+      remoteProfile: otherProfile ? { name: otherProfile.name, geo: otherProfile.geo } : null,
+    };
+    return selectLiveTestPresentation(view, localSlot ?? 0);
+  }, [
+    runId,
+    phase,
+    currentStage,
+    stageProgress,
+    liveLatency,
+    latencyBaseline,
+    connectionType,
+    selfProfile,
+    otherProfile,
+    localSlot,
+  ]);
+
+  // Imperative Three.js/Anime.js failures after mount cannot reach a React
+  // error boundary, so they land here. This records the failure and swaps the
+  // enhancement for a quiet panel; it dispatches no room event and touches no
+  // measurement state.
+  const handleVisualError = useCallback((error: unknown) => {
+    console.warn("live visualization unavailable", error);
+    setVisualFailed(true);
+  }, []);
+
+  // Sticky for the run, cleared by a new one.
+  useEffect(() => {
+    setVisualFailed(false);
+  }, [runId]);
+
   if (token === null) {
     return (
       <main className="flex min-h-screen items-center justify-center px-4">
@@ -915,7 +1000,7 @@ export default function Room({ params }: Route.ComponentProps) {
       : `/room/${slug}`;
 
   const roomSummary = (
-    <section className="flex w-full max-w-sm flex-col gap-3 rounded-2xl border border-gray-200 p-5 text-center dark:border-gray-700">
+    <section className="surface-panel flex w-full max-w-sm flex-col gap-3 rounded-2xl border border-gray-200 p-5 text-center dark:border-gray-700">
       <p className="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">
         Room ID
       </p>
@@ -964,7 +1049,7 @@ export default function Room({ params }: Route.ComponentProps) {
             saveProfile(confirmed);
             setConfirmedProfile(confirmed);
           }}
-          className="flex w-full max-w-sm flex-col gap-4 rounded-2xl border border-gray-200 p-5 dark:border-gray-700"
+          className="surface-panel flex w-full max-w-sm flex-col gap-4 rounded-2xl border border-gray-200 p-5 dark:border-gray-700"
         >
           <h2 className="text-sm font-medium text-gray-700 dark:text-gray-200">
             Confirm your profile before joining
@@ -985,10 +1070,13 @@ export default function Room({ params }: Route.ComponentProps) {
   }
 
   return (
-    <main className="flex min-h-screen flex-col items-center gap-8 px-4 py-16">
+    // `relative` is load-bearing: the globe layer is a fixed element portalled
+    // to the front of <body>, so this has to be positioned too for document
+    // order — rather than a z-index — to put the page on top of it.
+    <main className="relative flex min-h-screen flex-col items-center gap-8 px-4 py-16">
       {roomSummary}
 
-      <section className="flex w-full max-w-sm flex-col items-center gap-4 rounded-2xl border border-gray-200 p-5 dark:border-gray-700">
+      <section className="surface-panel flex w-full max-w-sm flex-col items-center gap-4 rounded-2xl border border-gray-200 p-5 dark:border-gray-700">
         {terminal ? (
           <>
             <p
@@ -1075,7 +1163,7 @@ export default function Room({ params }: Route.ComponentProps) {
             )}
             {phase === "testing" && currentStage !== null && self && (
               <div className="flex flex-col items-center gap-1">
-                {Object.entries(stageProgress)
+                {Object.entries(stageProgress.entries)
                   .filter(([key]) => key.startsWith(`${currentStage}:`))
                   .map(([key, snap]) => (
                     <p key={key} className="text-sm text-gray-700 dark:text-gray-200">
@@ -1103,6 +1191,34 @@ export default function Room({ params }: Route.ComponentProps) {
           </>
         )}
       </section>
+
+      {/*
+        The optional enhancement, a sibling of the core panel above and never
+        its parent: a rejected chunk, a thrown child, or an imperative
+        Three.js/Anime.js failure can only replace this block. The metrics,
+        stage, connection badge and Cancel button stay mounted and functional
+        in every one of those cases.
+
+        Mounted for the whole life of the room, not just `testing`: the globe
+        gives the waiting and pairing screens something true to show, picks up
+        each peer's location the moment it arrives, and stays up with the run's
+        finished trace beside the result. The dashboard decides for itself
+        which of its three panels are meaningful at each point. It stays hidden
+        on a terminal error screen, where the only useful thing is the reason.
+      */}
+      {!terminal && self && (
+        <div className="w-full max-w-3xl">
+          <LiveVisualizationBoundary
+            resetKey={runId}
+            failed={visualFailed}
+            onError={handleVisualError}
+          >
+            <Suspense fallback={<VisualizationPending />}>
+              <LiveTestDashboard presentation={presentation} onVisualError={handleVisualError} />
+            </Suspense>
+          </LiveVisualizationBoundary>
+        </div>
+      )}
     </main>
   );
 }
