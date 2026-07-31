@@ -37,7 +37,7 @@ body {
     --transfer-receive: #22d3ee; /* cyan-400    */
     --transfer-send: #a78bfa; /* violet-400  */
     --transfer-duplex: #34d399; /* emerald-400 */
-    --transfer-idle: #94a3b8; /* slate-400   */
+    --transfer-idle: #ffffff; /* slate-400   */
   }
 }
 

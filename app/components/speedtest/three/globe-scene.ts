@@ -28,8 +28,8 @@ export interface QualitySettings {
 }
 
 export const QUALITY: Record<QualityTier, QualitySettings> = {
-  high: { points: 200_000, particlesPerStream: 40, routeSegments: 96, maxPixelRatio: 2, antialias: true },
-  medium: { points: 100_000, particlesPerStream: 28, routeSegments: 64, maxPixelRatio: 1.75, antialias: true },
+  high: { points: 200_000, particlesPerStream: 40, routeSegments: 128, maxPixelRatio: 4, antialias: true },
+  medium: { points: 100_000, particlesPerStream: 28, routeSegments: 96, maxPixelRatio: 2, antialias: true },
   low: { points: 50_000, particlesPerStream: 18, routeSegments: 48, maxPixelRatio: 1.5, antialias: false },
 };
 

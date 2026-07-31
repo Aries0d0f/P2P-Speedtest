@@ -54,8 +54,8 @@ const MAX_CAMERA_FOV = 150;
 const OCEAN_COLOR = new THREE.Color(0x1b3350);
 const LAND_COLOR = new THREE.Color(0x6ea8d8);
 const GLOBE_INTERIOR = 0x060a14;
-const MARKER_RADIUS = 1.012;
-const ROUTE_TUBE_RADIUS = 0.008;
+const MARKER_RADIUS = 1;
+const ROUTE_TUBE_RADIUS = 0.002;
 
 /** Decorative only, and deliberately narrow: the difference between a slow
  * and a fast link is visible, but no viewer could mistake a dot for a packet
@@ -173,7 +173,7 @@ export async function createGlobeScene(options: GlobeSceneOptions): Promise<Glob
     cloudColors[i * 3] = color.r;
     cloudColors[i * 3 + 1] = color.g;
     cloudColors[i * 3 + 2] = color.b;
-    cloudSizes[i] = isLand ? 0.2 : 0.01;
+    cloudSizes[i] = isLand ? 0.15 : 0.01;
   }
 
   const cloudGeometry = track(new THREE.BufferGeometry());
