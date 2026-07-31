@@ -27,6 +27,21 @@ const FAST_TIMING = {
   turnCredentialFloorMs: 0,
 };
 
+/**
+ * For cases that need both peers alive across several connects.
+ *
+ * The DO declares a slot stale at `2 * heartbeatIntervalMs` and only sends its
+ * ping at `1 *`, so staying alive depends on the alarm firing inside that
+ * window — which under workerd it often does not do at all. At FAST_TIMING's
+ * 40ms that window is 40ms, so both sockets close mid-test, `noLiveSockets`
+ * goes true, and idle cleanup deletes the room out from under the assertions.
+ * These cases assert slot/relay/finish behaviour, not staleness, so they opt
+ * out of the short windows entirely.
+ */
+function useLongLivedPeers() {
+  setTimingForTesting({ hardExpiryMs: 60_000, idleWindowMs: 60_000, heartbeatIntervalMs: 60_000 });
+}
+
 function getStub(name: string) {
   return env.SIGNALING_ROOM.getByName(name);
 }
@@ -110,6 +125,7 @@ describe("connection and peer assignment", () => {
   });
 
   it("rejects a third connection", async () => {
+    useLongLivedPeers();
     const stub = getStub("room-third-1");
     await stub.claim("room-third-1");
     await connect(stub);
@@ -175,6 +191,7 @@ describe("connection and peer assignment", () => {
   });
 
   it("relays a message between two peers verbatim", async () => {
+    useLongLivedPeers();
     const stub = getStub("room-relay-1");
     await stub.claim("room-relay-1");
 
@@ -315,6 +332,7 @@ describe("same-tab reconnect (refresh) does not pair with itself", () => {
 
 describe("hibernation-safe state", () => {
   it("rebuilds slot/peer state from getWebSockets + storage after an eviction", async () => {
+    useLongLivedPeers();
     const stub = getStub("room-hibernate-1");
     await stub.claim("room-hibernate-1");
 
@@ -420,6 +438,7 @@ describe("stale slot replacement", () => {
   });
 
   it("never evicts a live, responsive peer via a third join attempt", async () => {
+    useLongLivedPeers();
     const stub = getStub("room-live-not-evicted-1");
     await stub.claim("room-live-not-evicted-1");
 
@@ -432,6 +451,7 @@ describe("stale slot replacement", () => {
 
 describe("finish-ack lifecycle", () => {
   it("ends the room exactly once after both peers send run-finished", async () => {
+    useLongLivedPeers();
     const stub = getStub("room-finish-1");
     await stub.claim("room-finish-1");
 
@@ -454,6 +474,7 @@ describe("finish-ack lifecycle", () => {
   });
 
   it("emits finalization-timeout when only one peer finishes", async () => {
+    useLongLivedPeers();
     const stub = getStub("room-finish-timeout-1");
     await stub.claim("room-finish-timeout-1");
 
