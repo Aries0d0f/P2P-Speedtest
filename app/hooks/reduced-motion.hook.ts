@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 /**
  * `prefers-reduced-motion: reduce`, tracked live so a change during a run
- * takes effect immediately (06-live-test-visualization 6.5).
+ * takes effect immediately.
  *
  * Starts `false` so server rendering and the first client render agree; the
  * effect corrects it before the first frame of any animation.
