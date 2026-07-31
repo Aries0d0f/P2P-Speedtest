@@ -1,16 +1,13 @@
 /**
- * Signaling envelope (S2). `{ type, runId, payload }` is the whole message
- * set and is meant to stay that way — every type is either the DO telling a
- * peer something about the room, a lifecycle-only acknowledgement, or an
- * opaque blob relayed between peers. Isomorphic: both the Worker/DO and the
- * browser import this module.
+ * Signaling envelope (S2). Isomorphic: both the Worker/DO and the browser
+ * import this module.
  *
- * `peer-left` is declared for schema completeness but has no trigger in this
- * phase: a departure after a run has started is reported as `run-ended` with
- * `reason: "peer-left"` instead, since S2 makes the room terminal at that
- * point rather than leaving one peer waiting for a replacement.
+ * `peer-left` is declared for schema completeness but has no trigger: a
+ * departure after a run has started is reported as `run-ended` with
+ * `reason: "peer-left"` instead.
  */
 
+/** The only declaration of a room slot; every other module imports it. */
 export type Slot = 0 | 1;
 
 export type RunEndedReason =
@@ -48,13 +45,9 @@ export interface RunEndedPayload {
   reason: RunEndedReason;
 }
 
-// Phase 2 payloads. offer/answer/ice-candidate are SDP/ICE data relayed
-// verbatim between peers — the DO never inspects their contents, only
-// `isEnvelope`'s structural check and the run-scoping in `relayIfCurrentRun`
-// apply to them. `connIndex` (04-throughput revision: multiple parallel
-// `RTCPeerConnection`s) is opaque to the DO too — it's relayed verbatim
-// alongside the payload and only read by the two peers, to pair each
-// negotiation message with the right one of their several connections.
+// offer/answer/ice-candidate are relayed verbatim; the DO never inspects
+// their contents, and `connIndex` is opaque to it too — only the two peers
+// read it, to pair each negotiation message with the right connection.
 export interface IceServersPayload {
   iceServers: RTCIceServer[];
 }
@@ -78,8 +71,6 @@ export type Envelope =
   | { type: "offer"; runId: string; connIndex: number; payload: OfferPayload }
   | { type: "answer"; runId: string; connIndex: number; payload: AnswerPayload }
   | { type: "ice-candidate"; runId: string; connIndex: number; payload: IceCandidatePayload };
-
-export type EnvelopeType = Envelope["type"];
 
 /**
  * Structural check only; per-type payload shape is not validated here.
