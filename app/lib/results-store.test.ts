@@ -1,16 +1,15 @@
 import "fake-indexeddb/auto";
 import { beforeEach, describe, expect, it } from "vitest";
 import { computeResultHash } from "./result-hash";
+import { buildMetadata, type P2PSpeedtestResult } from "~/model/result.model";
 import {
   buildExportBundle,
-  buildMetadata,
   buildResultCopyText,
   getResult,
   importResults,
   listResults,
   saveResult,
-  type P2PSpeedtestResult,
-} from "./results";
+} from "./results-store";
 
 const ROOM = "4G7QZKX9M";
 const PEER_A = "3f29a1c4-5e6b-5a2d-9f3e-1b7c8d4a2e10";
