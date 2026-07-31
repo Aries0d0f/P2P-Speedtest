@@ -1,10 +1,10 @@
 import { useRef } from "react";
 import {
   PRIVACY_LEVELS,
-  defaultNameForLevel,
   type ConfirmedProfile,
   type PrivacyLevel,
-} from "~/lib/peer-profile";
+} from "~/model/peer.model";
+import { defaultNameForLevel } from "~/lib/peer-profile";
 
 const PRIVACY_COPY: Record<
   PrivacyLevel,
