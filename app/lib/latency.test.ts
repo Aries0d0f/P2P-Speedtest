@@ -1,14 +1,28 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  aggregateSamples,
-  decodeLatencyMessage,
-  LatencySession,
-  type Aggregate,
-  type LatencyHandoff,
-  type LatencyMessage,
-  type LiveLatency,
-  type Sample,
-} from "./latency";
+import type {
+  LatencyAggregate,
+  LiveLatency,
+  Sample,
+} from "~/model/measurement.model";
+import type { LatencyMessage } from "~/model/control-message.model";
+import { decodeControlMessage } from "./control-message";
+import { aggregateSamples, LatencySession, type LatencyHandoff } from "./latency";
+
+/** These sessions only ever emit the four latency types; narrowing keeps the
+ * relay honest rather than casting. */
+function asLatencyMessage(raw: unknown, runId: string): LatencyMessage | null {
+  const msg = decodeControlMessage(raw, runId);
+  if (!msg) return null;
+  switch (msg.type) {
+    case "channel-ready":
+    case "ping":
+    case "pong":
+    case "latency-ready":
+      return msg;
+    default:
+      return null;
+  }
+}
 
 const RUN_ID = "run-1";
 
@@ -49,127 +63,6 @@ describe("aggregateSamples", () => {
     ];
     expect(aggregateSamples(ascending)?.jitterMs).toBe(2);
     expect(aggregateSamples(shuffled)?.jitterMs).toBe(3);
-  });
-});
-
-describe("decodeLatencyMessage", () => {
-  it("round-trips channel-ready, ping, and pong", () => {
-    expect(
-      decodeLatencyMessage(
-        JSON.stringify({ runId: RUN_ID, type: "channel-ready", payload: {} }),
-        RUN_ID,
-      ),
-    ).toEqual({ runId: RUN_ID, type: "channel-ready", payload: {} });
-
-    expect(
-      decodeLatencyMessage(
-        JSON.stringify({ runId: RUN_ID, type: "ping", seq: 3, payload: {} }),
-        RUN_ID,
-      ),
-    ).toEqual({ runId: RUN_ID, type: "ping", seq: 3, payload: {} });
-
-    expect(
-      decodeLatencyMessage(
-        JSON.stringify({ runId: RUN_ID, type: "pong", seq: 3, payload: {} }),
-        RUN_ID,
-      ),
-    ).toEqual({ runId: RUN_ID, type: "pong", seq: 3, payload: {} });
-  });
-
-  it("round-trips latency-ready carrying a real aggregate or an honest null", () => {
-    const agg: Aggregate = { rttMs: 42, jitterMs: 3 };
-    expect(
-      decodeLatencyMessage(
-        JSON.stringify({ runId: RUN_ID, type: "latency-ready", payload: { aggregate: agg } }),
-        RUN_ID,
-      ),
-    ).toEqual({ runId: RUN_ID, type: "latency-ready", payload: { aggregate: agg } });
-
-    expect(
-      decodeLatencyMessage(
-        JSON.stringify({ runId: RUN_ID, type: "latency-ready", payload: { aggregate: null } }),
-        RUN_ID,
-      ),
-    ).toEqual({ runId: RUN_ID, type: "latency-ready", payload: { aggregate: null } });
-  });
-
-  it("rejects a stale or foreign runId", () => {
-    expect(
-      decodeLatencyMessage(
-        JSON.stringify({ runId: "other-run", type: "ping", seq: 0, payload: {} }),
-        RUN_ID,
-      ),
-    ).toBeNull();
-  });
-
-  it("rejects malformed JSON and non-object payloads", () => {
-    expect(decodeLatencyMessage("not json", RUN_ID)).toBeNull();
-    expect(decodeLatencyMessage(JSON.stringify("a string"), RUN_ID)).toBeNull();
-    expect(decodeLatencyMessage(42, RUN_ID)).toBeNull();
-  });
-
-  it("rejects a type outside the whole control vocabulary", () => {
-    expect(
-      decodeLatencyMessage(JSON.stringify({ runId: RUN_ID, type: "banana", payload: {} }), RUN_ID),
-    ).toBeNull();
-  });
-
-  it("rejects known control types this phase doesn't own — peer-profile and Phase 4's reserved names", () => {
-    expect(
-      decodeLatencyMessage(
-        JSON.stringify({ runId: RUN_ID, type: "peer-profile", payload: {} }),
-        RUN_ID,
-      ),
-    ).toBeNull();
-    expect(
-      decodeLatencyMessage(
-        JSON.stringify({ runId: RUN_ID, type: "stage-result", payload: {} }),
-        RUN_ID,
-      ),
-    ).toBeNull();
-    expect(
-      decodeLatencyMessage(
-        JSON.stringify({ runId: RUN_ID, type: "measurement-progress", payload: {} }),
-        RUN_ID,
-      ),
-    ).toBeNull();
-  });
-
-  it("rejects ping/pong with a missing, non-integer, or negative seq", () => {
-    expect(
-      decodeLatencyMessage(JSON.stringify({ runId: RUN_ID, type: "ping", payload: {} }), RUN_ID),
-    ).toBeNull();
-    expect(
-      decodeLatencyMessage(
-        JSON.stringify({ runId: RUN_ID, type: "ping", seq: 1.5, payload: {} }),
-        RUN_ID,
-      ),
-    ).toBeNull();
-    expect(
-      decodeLatencyMessage(
-        JSON.stringify({ runId: RUN_ID, type: "ping", seq: -1, payload: {} }),
-        RUN_ID,
-      ),
-    ).toBeNull();
-  });
-
-  it("rejects a latency-ready with a malformed or missing aggregate", () => {
-    expect(
-      decodeLatencyMessage(
-        JSON.stringify({
-          runId: RUN_ID,
-          type: "latency-ready",
-          payload: { aggregate: { rttMs: "x", jitterMs: 1 } },
-        }),
-        RUN_ID,
-      ),
-    ).toBeNull();
-    expect(
-      decodeLatencyMessage(
-        JSON.stringify({ runId: RUN_ID, type: "latency-ready", payload: {} }),
-        RUN_ID,
-      ),
-    ).toBeNull();
   });
 });
 
@@ -218,7 +111,7 @@ describe("LatencySession", () => {
     session.handleMessage({ runId: RUN_ID, type: "channel-ready", payload: {} });
     session.sendChannelReady(); // starts sampling and sends ping seq 0 synchronously
 
-    const ping = decodeLatencyMessage(sentRaws[1], RUN_ID); // sentRaws[0] is our own channel-ready
+    const ping = decodeControlMessage(sentRaws[1], RUN_ID); // sentRaws[0] is our own channel-ready
     expect(ping).toEqual({ runId: RUN_ID, type: "ping", seq: 0, payload: {} });
 
     vi.setSystemTime(37);
@@ -277,7 +170,7 @@ describe("LatencySession", () => {
       runId,
       send: (raw) => {
         if (dropPredicate?.(raw, "a")) return;
-        const msg = decodeLatencyMessage(raw, runId);
+        const msg = asLatencyMessage(raw, runId);
         if (msg) sessionB.handleMessage(msg);
       },
       callbacks: { onLive: (l) => liveA.push(l), onHandoff: (h) => handoffA.push(h) },
@@ -286,7 +179,7 @@ describe("LatencySession", () => {
       runId,
       send: (raw) => {
         if (dropPredicate?.(raw, "b")) return;
-        const msg = decodeLatencyMessage(raw, runId);
+        const msg = asLatencyMessage(raw, runId);
         if (msg) sessionA.handleMessage(msg);
       },
       callbacks: { onLive: (l) => liveB.push(l), onHandoff: (h) => handoffB.push(h) },

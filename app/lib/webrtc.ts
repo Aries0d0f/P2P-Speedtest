@@ -1,47 +1,16 @@
 /**
- * RTCPeerConnection wrapper (2.2, 2.3; multi-connection revision — see
- * 04-throughput-measurement.md "Revision: parallel RTCPeerConnections").
- * Each instance owns exactly **one** `RTCPeerConnection` and **one** data
- * channel (its offer/answer negotiation, ICE candidate exchange, relay
- * classification, and the stopProducing()/teardown() pair that the room's
- * terminal handoff (2.4) drives without reaching inside measurement
- * modules).
+ * One `RTCPeerConnection` and one data channel (2.2, 2.3).
  *
  * Bulk throughput comes from running `BULK_CONNECTION_COUNT` of these in
- * parallel — genuinely parallel, unlike multiple data channels on one
- * connection: each `RTCPeerConnection` gets its own ICE negotiation, DTLS
- * session, and SCTP association, hence its own independent congestion
- * window, the same way parallel TCP/WebSocket connections would. The
- * caller (room.tsx) is what fans out; this class only ever knows about the
- * one connection/channel it was constructed for.
- *
- * Deliberately signaling-transport-agnostic: the caller hands in `send`
- * (writes to the already-open signaling socket) and feeds inbound
- * offer/answer/ice-candidate envelopes matching this instance's own
- * `connIndex` to `handleSignalingMessage`. This module never touches the
- * WebSocket itself, and never inspects an envelope's `connIndex` beyond
- * stamping its own on outgoing messages — routing an inbound envelope to
- * the right instance is the caller's job.
+ * parallel — genuinely parallel, unlike several channels on one connection:
+ * each gets its own ICE negotiation, DTLS session and SCTP association, hence
+ * its own congestion window. The caller fans out; this class only ever knows
+ * the one connection it was constructed for, and routing an inbound envelope
+ * to the right instance is the caller's job.
  */
 
-import type { Envelope, Slot } from "./protocol";
-
-export type ConnectionType = "DIRECT" | "RELAY" | "UNKNOWN";
-
-export type ChannelLabel = "control" | "bulk";
-export type ConnectionRole = ChannelLabel;
-
-/** How many parallel bulk `RTCPeerConnection`s (04-throughput revision) —
- * one data channel each, run alongside the one control connection. */
-export const BULK_CONNECTION_COUNT = 4;
-
-/** `connIndex` values: 0 is always the control connection; bulk
- * connections take 1..`BULK_CONNECTION_COUNT`. Exported so room.tsx and
- * this module agree on the numbering without duplicating it. */
-export const CONTROL_CONN_INDEX = 0;
-export function bulkConnIndex(bulkSlot: number): number {
-  return CONTROL_CONN_INDEX + 1 + bulkSlot;
-}
+import type { Envelope, Slot } from "~/model/signaling.model";
+import type { ChannelLabel, ConnectionType, OwnAddress } from "~/model/connection.model";
 
 export interface WebrtcCallbacks {
   onConnectionStateChange?: (state: RTCPeerConnectionState) => void;
@@ -62,9 +31,7 @@ export interface WebrtcOptions {
    * stamped on every outgoing offer/answer/ice-candidate so the peer can
    * route it back to the matching instance on their side. */
   connIndex: number;
-  /** Which single channel this connection carries: reliable/ordered
-   * `control`, or unordered/non-retransmitting `bulk`. */
-  role: ConnectionRole;
+  role: ChannelLabel;
   iceServers: RTCIceServer[];
   send: (envelope: Envelope) => void;
   callbacks?: WebrtcCallbacks;
@@ -79,11 +46,9 @@ const CLASSIFICATION_POLL_INTERVAL_MS = 200;
 // wins late (Negotiation contract).
 const CLASSIFICATION_SETTLE_WINDOW_MS = 1000;
 
-// Some WebKit/Safari versions aggregate `connectionState` to "failed" for a
-// moment while ICE is still pruning/rechecking other candidate pairs after
-// nomination, then recover to "connected" on their own without any restart.
-// Confirming the failure still holds after a short grace window avoids
-// tearing down a connection that was never actually broken.
+// Some WebKit versions briefly aggregate `connectionState` to "failed" while
+// ICE is still pruning after nomination, then recover on their own. Confirm
+// the failure still holds rather than tearing down a working connection.
 const CONNECTION_FAILURE_CONFIRM_MS = 3000;
 
 const FORCE_RELAY_QUERY_PARAM = "forceRelay";
@@ -137,11 +102,6 @@ async function classify(pc: RTCPeerConnection): Promise<ConnectionType> {
     : "DIRECT";
 }
 
-export interface OwnAddress {
-  ip?: string;
-  protocol?: "IPv4" | "IPv6";
-}
-
 function toOwnAddress(address: string): OwnAddress {
   return { ip: address, protocol: address.includes(":") ? "IPv6" : "IPv4" };
 }
@@ -157,7 +117,7 @@ export class WebrtcConnection {
   private pendingCandidates: RTCIceCandidateInit[] = [];
 
   private readonly connIndex: number;
-  private readonly role: ConnectionRole;
+  private readonly role: ChannelLabel;
   private channel: RTCDataChannel | null = null;
 
   private producing = true;
@@ -205,11 +165,9 @@ export class WebrtcConnection {
       }
     };
 
-    // Diagnostic only: `iceConnectionState` is the more granular, more
-    // consistently implemented signal across browsers. Logged so a
-    // browser-specific disconnect (e.g. Safari/WebKit's looser
-    // `connectionState` aggregation) is visible in the console instead of
-    // only showing up as an unexplained close on the wire.
+    // Diagnostic only: the more granular, more consistently implemented
+    // signal, so a browser-specific disconnect is visible in the console
+    // rather than only as an unexplained close on the wire.
     this.pc.oniceconnectionstatechange = () => {
       const iceState = this.pc.iceConnectionState;
       if (iceState === "disconnected" || iceState === "failed") {
@@ -253,14 +211,10 @@ export class WebrtcConnection {
     return this.pc.connectionState;
   }
 
-  /** This peer's own address (2.6), derived from its gathered ICE
-   * candidates rather than asked of anyone. Prefers the server-reflexive
-   * candidate (this browser's address as seen from outside); on a relayed
-   * connection the selected pair's local candidate would be the TURN
-   * server's address, not this peer's, so it is never used here. Falls
-   * back to the host candidate actually in use (same-network pairing, or
-   * STUN blocked) and otherwise returns nothing — the schema allows the
-   * absence precisely because no server supplies these fields. */
+  /** Derived from gathered ICE candidates rather than asked of anyone (2.6).
+   * Prefers the server-reflexive candidate; the selected pair's local
+   * candidate is never used, because on a relayed connection that is the TURN
+   * server's address, not this peer's. Absence is a valid answer. */
   async getOwnAddress(): Promise<OwnAddress> {
     const stats = collectStats(await this.pc.getStats());
 
@@ -297,11 +251,9 @@ export class WebrtcConnection {
     }
   }
 
-  /** Prevents new negotiation, stage-control, ping, and bulk production
-   * without clearing data already handed to measurement modules. Leaves
-   * terminal control messages and signaling `run-finished` untouched —
-   * those are sent by higher-level code over channels this call doesn't
-   * close. */
+  /** Stops new production without clearing data already handed to
+   * measurement modules, and without closing the channels the terminal
+   * handoff still needs. */
   stopProducing(): void {
     this.producing = false;
   }

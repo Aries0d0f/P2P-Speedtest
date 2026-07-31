@@ -1,4 +1,4 @@
-import type { TestConfigPayload } from "~/lib/protocol";
+import type { TestConfigPayload } from "~/model/signaling.model";
 
 /**
  * The service's current test parameters. A room snapshots this once at

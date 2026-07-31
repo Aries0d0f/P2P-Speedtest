@@ -1,24 +1,16 @@
 /**
- * The shared checksum used by both peers when assembling a result and by
- * Phase 5's import path (4.3). `computeResultHash` is a **checksum, not a
- * signature** (S6) — it detects corruption and cross-peer disagreement, not
- * origin or authenticity. Name and comment it that way so nobody later
- * builds a trust decision on it.
+ * A **checksum, not a signature** (S6): it detects corruption and cross-peer
+ * disagreement, never origin or authenticity. Nothing may build a trust
+ * decision on it.
  *
- * `canonicalize` implements RFC 8785 (JCS), not "RFC 8785-shaped." Key
- * sorting is the easy half; the half that actually determines
- * interoperability is number/string serialization, both implemented exactly
- * per the spec below rather than left to `JSON.stringify`'s own rules.
+ * `canonicalize` implements RFC 8785 (JCS), not "RFC 8785-shaped": key sorting
+ * is the easy half, and number/string serialization — what actually determines
+ * interoperability — follows the spec rather than `JSON.stringify`'s rules.
  */
 
-/**
- * ECMAScript `Number::toString` per JCS: integers print with no `+`, no
- * trailing `.0`, and exponent form only outside the 1e21/1e-7 boundaries
- * that `Number.prototype.toString` already applies to `number` values. JS's
- * built-in `toString()` for `number` already implements this exact
- * algorithm (ECMA-262 Number::toString), so no bespoke formatting logic is
- * needed here beyond rejecting non-finite input.
- */
+/** JS's built-in `toString()` for `number` already *is* ECMA-262
+ * Number::toString, which is what JCS specifies — so nothing is needed here
+ * beyond rejecting non-finite input. */
 function serializeNumber(value: number): string {
   if (!Number.isFinite(value)) {
     throw new Error(`canonicalize: non-finite number ${value}`);

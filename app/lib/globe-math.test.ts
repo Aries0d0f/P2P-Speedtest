@@ -10,7 +10,7 @@ import {
   dot,
   fibonacciSphere,
   isMarkerVisible,
-  latLonToVector,
+  geoPointToVector,
   length,
   normalize,
   planRoute,
@@ -23,26 +23,25 @@ import {
   sampleRoute,
   targetOrientation,
   vec,
-  vectorToLatLon,
+  vectorToGeoPoint,
   vectorToUv,
-  type LatLon,
-  type Quat,
-  type Vec3,
 } from "~/lib/globe-math";
+import type { GeoPoint } from "~/model/geo.model";
+import type { Quat, Vec3 } from "~/model/globe.model";
 
-const TOKYO: LatLon = { lat: 35.6762, lon: 139.6503 };
-const BERLIN: LatLon = { lat: 52.52, lon: 13.405 };
-const SYDNEY: LatLon = { lat: -33.8688, lon: 151.2093 };
-const NULL_ISLAND: LatLon = { lat: 0, lon: 0 };
-const NORTH_POLE: LatLon = { lat: 90, lon: 0 };
-const SOUTH_POLE: LatLon = { lat: -90, lon: 0 };
-const DATELINE_WEST: LatLon = { lat: 10, lon: 179 };
-const DATELINE_EAST: LatLon = { lat: 10, lon: -179 };
+const TOKYO: GeoPoint = { lat: 35.6762, lon: 139.6503 };
+const BERLIN: GeoPoint = { lat: 52.52, lon: 13.405 };
+const SYDNEY: GeoPoint = { lat: -33.8688, lon: 151.2093 };
+const NULL_ISLAND: GeoPoint = { lat: 0, lon: 0 };
+const NORTH_POLE: GeoPoint = { lat: 90, lon: 0 };
+const SOUTH_POLE: GeoPoint = { lat: -90, lon: 0 };
+const DATELINE_WEST: GeoPoint = { lat: 10, lon: 179 };
+const DATELINE_EAST: GeoPoint = { lat: 10, lon: -179 };
 /** Tokyo's exact antipode. */
-const TOKYO_ANTIPODE: LatLon = { lat: -35.6762, lon: -40.3497 };
+const TOKYO_ANTIPODE: GeoPoint = { lat: -35.6762, lon: -40.3497 };
 /** Half a degree off the antipode: outside the fallback-plane band, but the
  * widest separation an ordinary arc has to survive. */
-const TOKYO_NEAR_ANTIPODE: LatLon = { lat: -35.6762, lon: -39.85 };
+const TOKYO_NEAR_ANTIPODE: GeoPoint = { lat: -35.6762, lon: -39.85 };
 
 const CAMERA_DISTANCE = 3;
 
@@ -53,30 +52,30 @@ function isFiniteVec(v: Vec3): boolean {
 describe("coordinate conversion", () => {
   it("produces unit vectors", () => {
     for (const p of [TOKYO, BERLIN, SYDNEY, NULL_ISLAND, NORTH_POLE, SOUTH_POLE]) {
-      expect(length(latLonToVector(p))).toBeCloseTo(1, 12);
+      expect(length(geoPointToVector(p))).toBeCloseTo(1, 12);
     }
   });
 
   it("places the prime meridian at the equator facing the camera", () => {
-    const v = latLonToVector(NULL_ISLAND);
+    const v = geoPointToVector(NULL_ISLAND);
     expect(v.x).toBeCloseTo(0, 12);
     expect(v.y).toBeCloseTo(0, 12);
     expect(v.z).toBeCloseTo(1, 12);
   });
 
   it("puts the north pole on +y and the south pole on -y", () => {
-    expect(latLonToVector(NORTH_POLE).y).toBeCloseTo(1, 12);
-    expect(latLonToVector(SOUTH_POLE).y).toBeCloseTo(-1, 12);
+    expect(geoPointToVector(NORTH_POLE).y).toBeCloseTo(1, 12);
+    expect(geoPointToVector(SOUTH_POLE).y).toBeCloseTo(-1, 12);
   });
 
   it("increases x with easterly longitude", () => {
-    expect(latLonToVector({ lat: 0, lon: 90 }).x).toBeCloseTo(1, 12);
-    expect(latLonToVector({ lat: 0, lon: -90 }).x).toBeCloseTo(-1, 12);
+    expect(geoPointToVector({ lat: 0, lon: 90 }).x).toBeCloseTo(1, 12);
+    expect(geoPointToVector({ lat: 0, lon: -90 }).x).toBeCloseTo(-1, 12);
   });
 
-  it("round-trips through vectorToLatLon", () => {
+  it("round-trips through vectorToGeoPoint", () => {
     for (const p of [TOKYO, BERLIN, SYDNEY, DATELINE_WEST, DATELINE_EAST]) {
-      const back = vectorToLatLon(latLonToVector(p));
+      const back = vectorToGeoPoint(geoPointToVector(p));
       expect(back.lat).toBeCloseTo(p.lat, 9);
       expect(back.lon).toBeCloseTo(p.lon, 9);
     }
@@ -85,16 +84,16 @@ describe("coordinate conversion", () => {
 
 describe("UV mapping", () => {
   it("agrees with the mask's corners and centre", () => {
-    expect(vectorToUv(latLonToVector(NULL_ISLAND))).toEqual({ u: 0.5, v: 0.5 });
-    expect(vectorToUv(latLonToVector(NORTH_POLE)).v).toBeCloseTo(0, 12);
-    expect(vectorToUv(latLonToVector(SOUTH_POLE)).v).toBeCloseTo(1, 12);
-    expect(vectorToUv(latLonToVector({ lat: 0, lon: -180 })).u).toBeCloseTo(0, 12);
-    expect(vectorToUv(latLonToVector({ lat: 0, lon: 179.999 })).u).toBeCloseTo(1, 5);
+    expect(vectorToUv(geoPointToVector(NULL_ISLAND))).toEqual({ u: 0.5, v: 0.5 });
+    expect(vectorToUv(geoPointToVector(NORTH_POLE)).v).toBeCloseTo(0, 12);
+    expect(vectorToUv(geoPointToVector(SOUTH_POLE)).v).toBeCloseTo(1, 12);
+    expect(vectorToUv(geoPointToVector({ lat: 0, lon: -180 })).u).toBeCloseTo(0, 12);
+    expect(vectorToUv(geoPointToVector({ lat: 0, lon: 179.999 })).u).toBeCloseTo(1, 5);
   });
 
-  it("uses the same longitude direction as latLonToVector", () => {
-    const west = vectorToUv(latLonToVector({ lat: 0, lon: -90 }));
-    const east = vectorToUv(latLonToVector({ lat: 0, lon: 90 }));
+  it("uses the same longitude direction as geoPointToVector", () => {
+    const west = vectorToUv(geoPointToVector({ lat: 0, lon: -90 }));
+    const east = vectorToUv(geoPointToVector({ lat: 0, lon: 90 }));
     expect(west.u).toBeLessThan(east.u);
   });
 
@@ -127,25 +126,25 @@ describe("fibonacciSphere", () => {
 
 describe("route planning", () => {
   it("classifies the three cases", () => {
-    expect(planRoute(latLonToVector(TOKYO), latLonToVector(BERLIN)).kind).toBe("arc");
-    expect(planRoute(latLonToVector(TOKYO), latLonToVector(TOKYO)).kind).toBe("shared-location");
+    expect(planRoute(geoPointToVector(TOKYO), geoPointToVector(BERLIN)).kind).toBe("arc");
+    expect(planRoute(geoPointToVector(TOKYO), geoPointToVector(TOKYO)).kind).toBe("shared-location");
     // Half a degree short of the antipode is still an ordinary arc: the
     // fallback plane must not quietly swallow real long-haul routes.
-    expect(planRoute(latLonToVector(TOKYO), latLonToVector(TOKYO_NEAR_ANTIPODE)).kind).toBe("arc");
-    const a = latLonToVector(TOKYO);
+    expect(planRoute(geoPointToVector(TOKYO), geoPointToVector(TOKYO_NEAR_ANTIPODE)).kind).toBe("arc");
+    const a = geoPointToVector(TOKYO);
     expect(planRoute(a, vec(-a.x, -a.y, -a.z)).kind).toBe("antipodal");
-    expect(planRoute(a, latLonToVector(TOKYO_ANTIPODE)).kind).toBe("antipodal");
+    expect(planRoute(a, geoPointToVector(TOKYO_ANTIPODE)).kind).toBe("antipodal");
   });
 
   it("gives a shared location no arch at all", () => {
-    const plan = planRoute(latLonToVector(TOKYO), latLonToVector(TOKYO));
+    const plan = planRoute(geoPointToVector(TOKYO), geoPointToVector(TOKYO));
     expect(plan.lift).toBe(0);
     expect(plan.theta).toBeLessThan(1e-6);
   });
 
   it("scales lift with separation but clamps both ends", () => {
-    const near = planRoute(latLonToVector(TOKYO), latLonToVector({ lat: 35.5, lon: 139.6 }));
-    const far = planRoute(latLonToVector(TOKYO), latLonToVector(BERLIN));
+    const near = planRoute(geoPointToVector(TOKYO), geoPointToVector({ lat: 35.5, lon: 139.6 }));
+    const far = planRoute(geoPointToVector(TOKYO), geoPointToVector(BERLIN));
     expect(near.lift).toBeGreaterThan(0);
     expect(near.lift).toBeLessThan(far.lift);
     expect(far.lift).toBeLessThanOrEqual(0.28);
@@ -153,7 +152,7 @@ describe("route planning", () => {
 });
 
 describe("great-circle route sampling", () => {
-  const pairs: Array<[string, LatLon, LatLon]> = [
+  const pairs: Array<[string, GeoPoint, GeoPoint]> = [
     ["Tokyo/Berlin", TOKYO, BERLIN],
     ["Berlin/Tokyo", BERLIN, TOKYO],
     ["date line", DATELINE_WEST, DATELINE_EAST],
@@ -166,8 +165,8 @@ describe("great-circle route sampling", () => {
 
   for (const [name, from, to] of pairs) {
     it(`${name}: endpoints, no NaN, above the surface`, () => {
-      const a = latLonToVector(from);
-      const b = latLonToVector(to);
+      const a = geoPointToVector(from);
+      const b = geoPointToVector(to);
       const points = sampleRoute(a, b, 48);
 
       expect(points).toHaveLength(49);
@@ -188,8 +187,8 @@ describe("great-circle route sampling", () => {
     });
 
     it(`${name}: total sweep never exceeds pi`, () => {
-      const a = latLonToVector(from);
-      const b = latLonToVector(to);
+      const a = geoPointToVector(from);
+      const b = geoPointToVector(to);
       const points = sampleRoute(a, b, 64).map((p) => normalize(p)!);
       let sweep = 0;
       for (let i = 1; i < points.length; i++) sweep += angleBetween(points[i - 1], points[i]);
@@ -199,17 +198,17 @@ describe("great-circle route sampling", () => {
 
   it("crosses the date line by the short route", () => {
     const points = sampleRoute(
-      latLonToVector(DATELINE_WEST),
-      latLonToVector(DATELINE_EAST),
+      geoPointToVector(DATELINE_WEST),
+      geoPointToVector(DATELINE_EAST),
       32,
-    ).map((p) => vectorToLatLon(normalize(p)!));
+    ).map((p) => vectorToGeoPoint(normalize(p)!));
     // 2 degrees apart, not 358: every sample stays in the |lon| >= 179 band.
     for (const p of points) expect(Math.abs(p.lon)).toBeGreaterThanOrEqual(178.9);
   });
 
   it("is symmetric: reversing the endpoints reverses the samples", () => {
-    const a = latLonToVector(TOKYO);
-    const b = latLonToVector(BERLIN);
+    const a = geoPointToVector(TOKYO);
+    const b = geoPointToVector(BERLIN);
     const forward = sampleRoute(a, b, 16);
     const backward = sampleRoute(b, a, 16).reverse();
     for (let i = 0; i < forward.length; i++) {
@@ -220,7 +219,7 @@ describe("great-circle route sampling", () => {
   });
 
   it("uses a deterministic plane for an exactly antipodal pair", () => {
-    const a = latLonToVector(TOKYO);
+    const a = geoPointToVector(TOKYO);
     const b = vec(-a.x, -a.y, -a.z);
     const first = sampleRoute(a, b, 24);
     const second = sampleRoute(a, b, 24);
@@ -233,15 +232,15 @@ describe("great-circle route sampling", () => {
   });
 
   it("uses the east fallback plane when the endpoint is itself polar", () => {
-    const a = latLonToVector(NORTH_POLE);
-    const b = latLonToVector(SOUTH_POLE);
+    const a = geoPointToVector(NORTH_POLE);
+    const b = geoPointToVector(SOUTH_POLE);
     // Pole to pole is exactly antipodal *and* parallel to the north
     // reference, so the fallback has to switch axes rather than divide by 0.
     for (const p of sampleRoute(a, b, 16)) expect(isFiniteVec(p)).toBe(true);
   });
 
   it("collapses a shared location to a zero-length pulse", () => {
-    const a = latLonToVector(TOKYO);
+    const a = geoPointToVector(TOKYO);
     const points = sampleRoute(a, a, 8);
     for (const p of points) {
       expect(p.x).toBeCloseTo(a.x, 12);
@@ -261,28 +260,28 @@ describe("marker visibility", () => {
 
   it("pulls the camera back only as far as the separation demands", () => {
     const near = recommendedCameraDistance(
-      latLonToVector(TOKYO),
-      latLonToVector({ lat: 35.5, lon: 139.6 }),
+      geoPointToVector(TOKYO),
+      geoPointToVector({ lat: 35.5, lon: 139.6 }),
     );
-    const wide = recommendedCameraDistance(latLonToVector(SYDNEY), latLonToVector(BERLIN));
+    const wide = recommendedCameraDistance(geoPointToVector(SYDNEY), geoPointToVector(BERLIN));
     expect(near).toBe(MIN_CAMERA_DISTANCE);
     expect(wide).toBeGreaterThan(near);
     expect(wide).toBeLessThanOrEqual(MAX_CAMERA_DISTANCE);
   });
 
   it("caps the distance for an antipodal pair rather than flying away", () => {
-    const a = latLonToVector(TOKYO);
+    const a = geoPointToVector(TOKYO);
     expect(recommendedCameraDistance(a, vec(-a.x, -a.y, -a.z))).toBe(MAX_CAMERA_DISTANCE);
   });
 
   it("uses the close default when only one marker exists", () => {
-    expect(recommendedCameraDistance(latLonToVector(TOKYO), null)).toBe(MIN_CAMERA_DISTANCE);
+    expect(recommendedCameraDistance(geoPointToVector(TOKYO), null)).toBe(MIN_CAMERA_DISTANCE);
     expect(recommendedCameraDistance(null, null)).toBe(MIN_CAMERA_DISTANCE);
   });
 });
 
 describe("desktop orientation", () => {
-  const pairs: Array<[string, LatLon, LatLon]> = [
+  const pairs: Array<[string, GeoPoint, GeoPoint]> = [
     ["Tokyo/Berlin", TOKYO, BERLIN],
     ["date line", DATELINE_WEST, DATELINE_EAST],
     ["Sydney/Berlin", SYDNEY, BERLIN],
@@ -291,8 +290,8 @@ describe("desktop orientation", () => {
 
   for (const [name, from, to] of pairs) {
     it(`${name}: keeps both markers visible at Earth's tilt`, () => {
-      const local = latLonToVector(from);
-      const remote = latLonToVector(to);
+      const local = geoPointToVector(from);
+      const remote = geoPointToVector(to);
       const { quat, reason } = targetOrientation({ layout: "desktop", local, remote });
       expect(reason).toBe("both-markers");
 
@@ -307,7 +306,7 @@ describe("desktop orientation", () => {
   }
 
   it("faces a single marker and still applies the tilt", () => {
-    const local = latLonToVector(BERLIN);
+    const local = geoPointToVector(BERLIN);
     const { quat, reason } = targetOrientation({ layout: "desktop", local, remote: null });
     expect(reason).toBe("single-marker");
     expect(quatRotate(quat, local).z).toBeCloseTo(1, 9);
@@ -326,7 +325,7 @@ describe("desktop orientation", () => {
     const previous = quatFromUnitVectors(vec(0, 0, 1), vec(1, 0, 0));
     const { quat, reason } = targetOrientation({
       layout: "desktop",
-      local: latLonToVector(NORTH_POLE),
+      local: geoPointToVector(NORTH_POLE),
       remote: null,
       previous,
     });
@@ -336,7 +335,7 @@ describe("desktop orientation", () => {
 });
 
 describe("mobile orientation", () => {
-  const pairs: Array<[string, LatLon, LatLon]> = [
+  const pairs: Array<[string, GeoPoint, GeoPoint]> = [
     ["Tokyo/Berlin", TOKYO, BERLIN],
     ["Berlin/Tokyo", BERLIN, TOKYO],
     ["date line", DATELINE_WEST, DATELINE_EAST],
@@ -349,8 +348,8 @@ describe("mobile orientation", () => {
       // Run it twice with the roles swapped: whichever peer is "local" must
       // end up on the left, which is the thing that is easy to get backwards.
       for (const [local, remote] of [
-        [latLonToVector(from), latLonToVector(to)],
-        [latLonToVector(to), latLonToVector(from)],
+        [geoPointToVector(from), geoPointToVector(to)],
+        [geoPointToVector(to), geoPointToVector(from)],
       ]) {
         const { quat } = targetOrientation({ layout: "mobile", local, remote });
         const distance = recommendedCameraDistance(local, remote);
@@ -366,7 +365,7 @@ describe("mobile orientation", () => {
   }
 
   it("holds a previous orientation for a shared location", () => {
-    const same = latLonToVector(TOKYO);
+    const same = geoPointToVector(TOKYO);
     const previous = quatFromUnitVectors(vec(0, 0, 1), vec(0, 1, 0));
     const { quat, reason } = targetOrientation({
       layout: "mobile",
@@ -379,14 +378,14 @@ describe("mobile orientation", () => {
   });
 
   it("faces a shared location when there is no previous orientation", () => {
-    const same = latLonToVector(TOKYO);
+    const same = geoPointToVector(TOKYO);
     const { quat } = targetOrientation({ layout: "mobile", local: same, remote: same });
     expect(quatRotate(quat, same).z).toBeCloseTo(1, 9);
   });
 
   it("produces no NaN for a near-antipodal pair", () => {
-    const local = latLonToVector(TOKYO);
-    const remote = latLonToVector(TOKYO_NEAR_ANTIPODE);
+    const local = geoPointToVector(TOKYO);
+    const remote = geoPointToVector(TOKYO_NEAR_ANTIPODE);
     for (const layout of ["desktop", "mobile"] as const) {
       const { quat } = targetOrientation({ layout, local, remote });
       for (const component of [quat.x, quat.y, quat.z, quat.w]) {
@@ -397,7 +396,7 @@ describe("mobile orientation", () => {
   });
 
   it("keeps at least the midpoint visible for an exactly antipodal pair", () => {
-    const local = latLonToVector(TOKYO);
+    const local = geoPointToVector(TOKYO);
     const remote = vec(-local.x, -local.y, -local.z);
     const { quat } = targetOrientation({ layout: "desktop", local, remote });
     const mid = quatRotate(quat, normalize(routeMidpoint(local, remote))!);
@@ -407,8 +406,8 @@ describe("mobile orientation", () => {
 
 describe("quaternion helpers", () => {
   it("rotates from one unit vector onto another", () => {
-    const from = latLonToVector(TOKYO);
-    const to = latLonToVector(BERLIN);
+    const from = geoPointToVector(TOKYO);
+    const to = geoPointToVector(BERLIN);
     const rotated = quatRotate(quatFromUnitVectors(from, to), from);
     expect(rotated.x).toBeCloseTo(to.x, 9);
     expect(rotated.y).toBeCloseTo(to.y, 9);
@@ -416,7 +415,7 @@ describe("quaternion helpers", () => {
   });
 
   it("handles identical and opposite vectors without NaN", () => {
-    const a = latLonToVector(TOKYO);
+    const a = geoPointToVector(TOKYO);
     expect(quatFromUnitVectors(a, a)).toEqual({ x: 0, y: 0, z: 0, w: 1 });
     const opposite = quatRotate(quatFromUnitVectors(a, vec(-a.x, -a.y, -a.z)), a);
     expect(opposite.x).toBeCloseTo(-a.x, 9);
@@ -440,8 +439,8 @@ describe("quaternion helpers", () => {
   });
 
   it("reaches its endpoints exactly", () => {
-    const a = quatFromUnitVectors(vec(0, 0, 1), latLonToVector(TOKYO));
-    const b = quatFromUnitVectors(vec(0, 0, 1), latLonToVector(BERLIN));
+    const a = quatFromUnitVectors(vec(0, 0, 1), geoPointToVector(TOKYO));
+    const b = quatFromUnitVectors(vec(0, 0, 1), geoPointToVector(BERLIN));
     const start = quatSlerp(a, b, 0);
     const end = quatSlerp(a, b, 1);
     expect(start.w).toBeCloseTo(a.w, 9);
@@ -449,8 +448,8 @@ describe("quaternion helpers", () => {
   });
 
   it("stays normalized across the interpolation", () => {
-    const a = quatFromUnitVectors(vec(0, 0, 1), latLonToVector(SYDNEY));
-    const b = quatFromUnitVectors(vec(0, 0, 1), latLonToVector(BERLIN));
+    const a = quatFromUnitVectors(vec(0, 0, 1), geoPointToVector(SYDNEY));
+    const b = quatFromUnitVectors(vec(0, 0, 1), geoPointToVector(BERLIN));
     for (let t = 0; t <= 1.0001; t += 0.1) {
       const q = quatSlerp(a, b, Math.min(1, t));
       expect(Math.hypot(q.x, q.y, q.z, q.w)).toBeCloseTo(1, 9);

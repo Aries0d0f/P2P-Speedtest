@@ -7,7 +7,7 @@ import {
   type RunEndedReason,
   type Slot,
   type TestConfigPayload,
-} from "~/lib/protocol";
+} from "~/model/signaling.model";
 import { getCurrentTestConfig } from "./test-config";
 import { mintTurnCredentials } from "./turn-provider";
 
