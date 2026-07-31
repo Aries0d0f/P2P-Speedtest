@@ -1,4 +1,4 @@
-import type { ConnectionType } from "~/lib/webrtc";
+import type { ConnectionType } from "~/model/connection.model";
 
 const COPY: Record<ConnectionType, { label: string; className: string }> = {
   DIRECT: {
