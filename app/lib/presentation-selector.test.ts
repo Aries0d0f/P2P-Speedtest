@@ -1,25 +1,19 @@
 import { describe, expect, it } from "vitest";
 
-import type { StageProgressSnapshot } from "~/lib/control-channel";
-import { DOWNLOAD, DUPLEX, UPLOAD, edgeKey, type Slot, type StageId } from "~/lib/stage";
-import {
-  describePresentation,
-  selectLiveTestPresentation,
-  selectStoredResultPresentation,
-  snapshotLoss,
-  snapshotMbps,
-  toVisualLocation,
-  tokenForRole,
-  type LiveTestRoomView,
-} from "~/lib/test-visualization";
+import type { StageProgress } from "~/model/measurement.model";
+import type { Slot } from "~/model/signaling.model";
+import { DOWNLOAD, DUPLEX, UPLOAD, edgeKey, type StageId } from "~/model/stage.model";
+import { describePresentation, selectLiveTestPresentation, selectStoredResultPresentation, snapshotLoss, snapshotMbps, tokenForRole } from "~/lib/presentation-selector";
+import { toGeoPoint } from "~/model/geo.model";
+import type { LiveTestRoomView } from "~/model/presentation.model";
 
 const RUN = "run-1";
 
 function snapshot(
   stageId: StageId,
   receiverSlot: Slot,
-  over: Partial<StageProgressSnapshot> = {},
-): StageProgressSnapshot {
+  over: Partial<StageProgress> = {},
+): StageProgress {
   return {
     stageId,
     receiverSlot,
@@ -38,13 +32,12 @@ function view(over: Partial<LiveTestRoomView> = {}): LiveTestRoomView {
     runId: RUN,
     phase: "testing",
     stageId: null,
-    progressRunId: RUN,
-    progress: {},
+    stageProgress: { runId: RUN, entries: {} },
     liveLatency: null,
     latencyBaseline: undefined,
     connectionType: "DIRECT",
-    localProfile: { name: "Local", geo: { lat: 35.68, lon: 139.69 } },
-    remoteProfile: { name: "Remote", geo: { lat: 52.52, lon: 13.4 } },
+    selfProfile: { name: "Local", geo: { lat: 35.68, lon: 139.69 } },
+    otherProfile: { name: "Remote", geo: { lat: 52.52, lon: 13.4 } },
     ...over,
   };
 }
@@ -141,16 +134,19 @@ describe("selectLiveTestPresentation — stage and local view mapping", () => {
 describe("selectLiveTestPresentation — receiver-observed speeds", () => {
   it("reads the receiver snapshot for the local receive edge", () => {
     const p = selectLiveTestPresentation(
-      withStage(DOWNLOAD, { progress: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1) } }),
+      withStage(DOWNLOAD, { stageProgress: { runId: RUN, entries: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1) } } }),
       1,
     );
     expect(p.channels[0].mbps).toBeCloseTo(10, 6);
   });
 
   it("shows the sender the same receiver-observed number, not its own bytes", () => {
-    const progress = { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1, { bytes: 500_000 }) };
-    const sender = selectLiveTestPresentation(withStage(DOWNLOAD, { progress }), 0);
-    const receiver = selectLiveTestPresentation(withStage(DOWNLOAD, { progress }), 1);
+    const stageProgress = {
+      runId: RUN,
+      entries: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1, { bytes: 500_000 }) },
+    };
+    const sender = selectLiveTestPresentation(withStage(DOWNLOAD, { stageProgress }), 0);
+    const receiver = selectLiveTestPresentation(withStage(DOWNLOAD, { stageProgress }), 1);
     expect(sender.channels[0].mbps).toBe(receiver.channels[0].mbps);
     expect(sender.channels[0].mbps).toBeCloseTo(4, 6);
   });
@@ -158,10 +154,10 @@ describe("selectLiveTestPresentation — receiver-observed speeds", () => {
   it("keeps both duplex directions separate and never combines them", () => {
     const p = selectLiveTestPresentation(
       withStage(DUPLEX, {
-        progress: {
+        stageProgress: { runId: RUN, entries: {
           [edgeKey(DUPLEX, 0)]: snapshot(DUPLEX, 0, { bytes: 1_250_000 }),
           [edgeKey(DUPLEX, 1)]: snapshot(DUPLEX, 1, { bytes: 2_500_000 }),
-        },
+        } },
       }),
       0,
     );
@@ -179,7 +175,7 @@ describe("selectLiveTestPresentation — receiver-observed speeds", () => {
 
   it("keeps a genuine zero-byte reading distinguishable from no reading", () => {
     const p = selectLiveTestPresentation(
-      withStage(UPLOAD, { progress: { [edgeKey(UPLOAD, 0)]: snapshot(UPLOAD, 0, { bytes: 0 }) } }),
+      withStage(UPLOAD, { stageProgress: { runId: RUN, entries: { [edgeKey(UPLOAD, 0)]: snapshot(UPLOAD, 0, { bytes: 0 }) } } }),
       0,
     );
     expect(p.channels[0].mbps).toBe(0);
@@ -188,9 +184,9 @@ describe("selectLiveTestPresentation — receiver-observed speeds", () => {
   it("reports receiver-observed loss", () => {
     const p = selectLiveTestPresentation(
       withStage(DOWNLOAD, {
-        progress: {
+        stageProgress: { runId: RUN, entries: {
           [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1, { chunksSeen: 90, highestSeqPlusOne: 100 }),
-        },
+        } },
       }),
       1,
     );
@@ -200,7 +196,7 @@ describe("selectLiveTestPresentation — receiver-observed speeds", () => {
   it("carries the final (highest-elapsed) update like any other sample", () => {
     const final = snapshot(DOWNLOAD, 1, { bytes: 12_500_000, elapsedMs: 10_000 });
     const p = selectLiveTestPresentation(
-      withStage(DOWNLOAD, { progress: { [edgeKey(DOWNLOAD, 1)]: final } }),
+      withStage(DOWNLOAD, { stageProgress: { runId: RUN, entries: { [edgeKey(DOWNLOAD, 1)]: final } } }),
       1,
     );
     expect(p.channels[0].mbps).toBeCloseTo(10, 6);
@@ -211,8 +207,7 @@ describe("selectLiveTestPresentation — staleness", () => {
   it("drops a progress bank retained from an earlier run", () => {
     const p = selectLiveTestPresentation(
       withStage(DOWNLOAD, {
-        progressRunId: "run-0",
-        progress: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1) },
+        stageProgress: { runId: "run-0", entries: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1) } },
       }),
       1,
     );
@@ -222,10 +217,10 @@ describe("selectLiveTestPresentation — staleness", () => {
   it("ignores snapshots belonging to a stage that is not active", () => {
     const p = selectLiveTestPresentation(
       withStage(UPLOAD, {
-        progress: {
+        stageProgress: { runId: RUN, entries: {
           [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1),
           [edgeKey(DUPLEX, 0)]: snapshot(DUPLEX, 0),
-        },
+        } },
       }),
       0,
     );
@@ -238,8 +233,7 @@ describe("selectLiveTestPresentation — staleness", () => {
     const p = selectLiveTestPresentation(
       withStage(DOWNLOAD, {
         runId: null,
-        progressRunId: null,
-        progress: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1) },
+        stageProgress: { runId: null, entries: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1) } },
       }),
       1,
     );
@@ -270,7 +264,7 @@ describe("selectLiveTestPresentation — phases", () => {
     const p = selectLiveTestPresentation(
       withStage(DUPLEX, {
         phase: "finalizing",
-        progress: { [edgeKey(DUPLEX, 0)]: snapshot(DUPLEX, 0) },
+        stageProgress: { runId: RUN, entries: { [edgeKey(DUPLEX, 0)]: snapshot(DUPLEX, 0) } },
       }),
       0,
     );
@@ -309,7 +303,7 @@ describe("selectLiveTestPresentation — peers and locations", () => {
 
   it("invents no coordinates for an Anonymous or missing profile", () => {
     const p = selectLiveTestPresentation(
-      view({ remoteProfile: { name: "Anon" }, localProfile: null }),
+      view({ otherProfile: { name: "Anon" }, selfProfile: null }),
       0,
     );
     expect(p.remotePeer.location).toBeNull();
@@ -320,22 +314,22 @@ describe("selectLiveTestPresentation — peers and locations", () => {
   });
 
   it("treats out-of-range and non-finite coordinates as unavailable", () => {
-    expect(toVisualLocation({ lat: 91, lon: 0 })).toBeNull();
-    expect(toVisualLocation({ lat: 0, lon: 181 })).toBeNull();
-    expect(toVisualLocation({ lat: Number.NaN, lon: 0 })).toBeNull();
-    expect(toVisualLocation({ lat: 0, lon: Number.POSITIVE_INFINITY })).toBeNull();
-    expect(toVisualLocation({ lat: 0 })).toBeNull();
-    expect(toVisualLocation(undefined)).toBeNull();
-    expect(toVisualLocation({ lat: -90, lon: 180 })).toEqual({ lat: -90, lon: 180 });
+    expect(toGeoPoint({ lat: 91, lon: 0 })).toBeNull();
+    expect(toGeoPoint({ lat: 0, lon: 181 })).toBeNull();
+    expect(toGeoPoint({ lat: Number.NaN, lon: 0 })).toBeNull();
+    expect(toGeoPoint({ lat: 0, lon: Number.POSITIVE_INFINITY })).toBeNull();
+    expect(toGeoPoint({ lat: 0 })).toBeNull();
+    expect(toGeoPoint(undefined)).toBeNull();
+    expect(toGeoPoint({ lat: -90, lon: 180 })).toEqual({ lat: -90, lon: 180 });
   });
 
   it("accepts a location that arrives after measurement started", () => {
     const before = selectLiveTestPresentation(
-      withStage(DOWNLOAD, { remoteProfile: { name: "Remote" } }),
+      withStage(DOWNLOAD, { otherProfile: { name: "Remote" } }),
       0,
     );
     const after = selectLiveTestPresentation(
-      withStage(DOWNLOAD, { remoteProfile: { name: "Remote", geo: { lat: 1, lon: 2 } } }),
+      withStage(DOWNLOAD, { otherProfile: { name: "Remote", geo: { lat: 1, lon: 2 } } }),
       0,
     );
     expect(before.remotePeer.location).toBeNull();
@@ -446,7 +440,7 @@ describe("selectStoredResultPresentation", () => {
 describe("purity and input surface", () => {
   it("does not mutate its input", () => {
     const v = withStage(DUPLEX, {
-      progress: { [edgeKey(DUPLEX, 0)]: snapshot(DUPLEX, 0) },
+      stageProgress: { runId: RUN, entries: { [edgeKey(DUPLEX, 0)]: snapshot(DUPLEX, 0) } },
     });
     const before = JSON.stringify(v);
     selectLiveTestPresentation(v, 0);
@@ -454,7 +448,7 @@ describe("purity and input surface", () => {
   });
 
   it("returns the same output for the same input", () => {
-    const v = withStage(UPLOAD, { progress: { [edgeKey(UPLOAD, 0)]: snapshot(UPLOAD, 0) } });
+    const v = withStage(UPLOAD, { stageProgress: { runId: RUN, entries: { [edgeKey(UPLOAD, 0)]: snapshot(UPLOAD, 0) } } });
     expect(selectLiveTestPresentation(v, 0)).toEqual(selectLiveTestPresentation(v, 0));
   });
 
@@ -467,15 +461,56 @@ describe("purity and input surface", () => {
         "connectionType",
         "latencyBaseline",
         "liveLatency",
-        "localProfile",
+        "selfProfile",
         "phase",
-        "progress",
-        "progressRunId",
-        "remoteProfile",
+        "stageProgress",
+        "otherProfile",
         "runId",
         "stageId",
       ].sort(),
     );
+  });
+
+  it("carries the fields the peer chose to disclose", () => {
+    // Already privacy-projected at the sender, so what reaches the view is
+    // exactly what that peer disclosed.
+    const geo = { lat: 1, lon: 2, city: "Testville" };
+    const p = selectLiveTestPresentation(
+      view({
+        selfProfile: { name: "Local", ip: "1.2.3.4", protocol: "IPv4", ua: "Firefox", geo },
+        otherProfile: { name: "Remote" },
+      }),
+      0,
+    );
+    expect(p.localPeer.ip).toBe("1.2.3.4");
+    expect(p.localPeer.protocol).toBe("IPv4");
+    expect(p.localPeer.ua).toBe("Firefox");
+    expect(p.localPeer.geo).toEqual(geo);
+    expect(p.localPeer.location).toEqual({ lat: 1, lon: 2 });
+  });
+
+  it("omits a withheld field rather than emitting it as undefined", () => {
+    const p = selectLiveTestPresentation(view({ otherProfile: { name: "Anon" } }), 0);
+    for (const key of ["ua", "ip", "protocol", "geo"]) {
+      expect(p.remotePeer).not.toHaveProperty(key);
+    }
+    expect(p.remotePeer.location).toBeNull();
+  });
+
+  it("emits no field outside the peer view's declared set", () => {
+    // A structural guard rather than a type-level one: widening `PeerView`
+    // has to be a deliberate edit here too.
+    const p = selectLiveTestPresentation(
+      view({
+        selfProfile: { name: "Local", ip: "1.2.3.4", protocol: "IPv4", ua: "Firefox" },
+        otherProfile: { name: "Remote", geo: { lat: 1, lon: 2 } },
+      }),
+      0,
+    );
+    const allowed = ["slot", "name", "ua", "ip", "protocol", "geo", "location", "profileKnown"];
+    for (const peer of [p.localPeer, p.remotePeer]) {
+      expect(Object.keys(peer).filter((k) => !allowed.includes(k))).toEqual([]);
+    }
   });
 
   it("reads only receiver-observed fields from a snapshot", () => {
@@ -509,18 +544,18 @@ describe("describePresentation", () => {
   it("states both peers, the direction, and the live number", () => {
     const text = describePresentation(
       selectLiveTestPresentation(
-        withStage(DOWNLOAD, { progress: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1) } }),
+        withStage(DOWNLOAD, { stageProgress: { runId: RUN, entries: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1) } } }),
         1,
       ),
     );
-    expect(text).toContain("Local (you)");
+    expect(text).toContain("Local (You)");
     expect(text).toContain("Stage: download");
     expect(text).toContain("Remote to Local: 10.0 Mbps");
   });
 
   it("says which peer's location is missing", () => {
     const text = describePresentation(
-      selectLiveTestPresentation(view({ remoteProfile: { name: "Anon" } }), 0),
+      selectLiveTestPresentation(view({ otherProfile: { name: "Anon" } }), 0),
     );
     expect(text).toContain("Anon — location not shared");
   });
