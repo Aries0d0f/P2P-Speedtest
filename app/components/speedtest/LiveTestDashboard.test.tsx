@@ -11,8 +11,10 @@ import LiveTestDashboard from "./LiveTestDashboard";
 import type { GlobeDiagnostics, GlobeScene, GlobeSceneFactory } from "~/model/globe.model";
 
 const RUN = "run-1";
-const TOKYO = { lat: 35.6762, lon: 139.6503 };
-const BERLIN = { lat: 52.52, lon: 13.405 };
+// Shaped like a real lookup, which returns place fields alongside the
+// coordinates — the marker keys off lat/lon, the text equivalent off the names.
+const TOKYO = { lat: 35.6762, lon: 139.6503, city: "Tokyo", country: "Japan" };
+const BERLIN = { lat: 52.52, lon: 13.405, city: "Berlin", country: "Germany" };
 
 /** The globe is exercised in `PeerGlobe.test.tsx`; here it is a stub so the
  * dashboard's own composition and semantics are what is under test. */
@@ -66,9 +68,9 @@ describe("LiveTestDashboard — semantics without the canvas", () => {
     // `aria-hidden` decoration and must not be what a reader relies on.
     const region = screen.getByRole("region", { name: "Peers and locations" });
     expect(region.textContent).toContain("Ada (You)");
-    expect(region.textContent).toContain("35.68, 139.65");
+    expect(region.textContent).toContain("Tokyo, Japan");
     expect(region.textContent).toContain("Grace");
-    expect(region.textContent).toContain("52.52, 13.40");
+    expect(region.textContent).toContain("Berlin, Germany");
   });
 
   it("says exactly whose location is unavailable", async () => {
@@ -77,7 +79,7 @@ describe("LiveTestDashboard — semantics without the canvas", () => {
     const graceLine = within(region).getByText("Grace").closest("p")!;
     expect(graceLine.textContent).toContain("location not shared");
     // The peer who did share is unaffected.
-    expect(region.textContent).toContain("35.68, 139.65");
+    expect(region.textContent).toContain("Tokyo, Japan");
   });
 
   it("distinguishes 'not shared' from 'not received yet'", async () => {
