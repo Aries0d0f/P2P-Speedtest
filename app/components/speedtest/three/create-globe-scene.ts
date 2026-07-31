@@ -57,6 +57,12 @@ const GLOBE_INTERIOR = 0x060a14;
 const MARKER_RADIUS = 1;
 const ROUTE_TUBE_RADIUS = 0.002;
 
+/** Particle size, in the same units as the cloud's `aSize` (see `cloudSizes`
+ * below) so the two stay in proportion when either is tuned. Comfortably
+ * larger than a land dot, so a package reads as a package rather than as
+ * another piece of the world. */
+const PARTICLE_SIZE = 0.5;
+
 /** Decorative only, and deliberately narrow: the difference between a slow
  * and a fast link is visible, but no viewer could mistake a dot for a packet
  * or read a speed off the animation. */
@@ -309,7 +315,7 @@ export async function createGlobeScene(options: GlobeSceneOptions): Promise<Glob
   interface Pool {
     points: THREE.Points;
     positions: Float32Array;
-    material: THREE.PointsMaterial;
+    material: THREE.ShaderMaterial;
     /** Phase in [0, 1) per particle, advanced in place. */
     phase: Float32Array;
     active: boolean;
@@ -323,15 +329,41 @@ export async function createGlobeScene(options: GlobeSceneOptions): Promise<Glob
     const positions = new Float32Array(POOL * 3);
     const geometry = track(new THREE.BufferGeometry());
     geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    // The same round-point shader as the world cloud, for the same two
+    // reasons: `PointsMaterial` draws untextured *squares*, and its built-in
+    // size attenuation keys off the canvas height — which, now that the canvas
+    // fills the screen while the globe deliberately does not, would grow the
+    // particles out of step with everything around them. `uScale` is fed the
+    // placeholder height in `resize`, exactly like the cloud.
     const material = track(
-      new THREE.PointsMaterial({
-        color: 0xffffff,
-        size: 0.028,
+      new THREE.ShaderMaterial({
         transparent: true,
-        opacity: 0.95,
         depthWrite: false,
+        uniforms: {
+          uColor: { value: new THREE.Color(0xffffff) },
+          uScale: { value: 1 },
+          uSize: { value: PARTICLE_SIZE },
+        },
+        vertexShader: /* glsl */ `
+          uniform float uScale;
+          uniform float uSize;
+          void main() {
+            vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
+            gl_PointSize = uSize * uScale / max(0.4, -viewPosition.z);
+            gl_Position = projectionMatrix * viewPosition;
+          }
+        `,
+        fragmentShader: /* glsl */ `
+          uniform vec3 uColor;
+          void main() {
+            vec2 offset = gl_PointCoord - vec2(0.5);
+            float d = dot(offset, offset);
+            if (d > 0.25) discard;
+            gl_FragColor = vec4(uColor, 0.95 * (1.0 - smoothstep(0.09, 0.25, d)));
+          }
+        `,
       }),
-    ) as THREE.PointsMaterial;
+    ) as THREE.ShaderMaterial;
     const points = new THREE.Points(geometry, material);
     points.visible = false;
     points.frustumCulled = false;
@@ -419,7 +451,7 @@ export async function createGlobeScene(options: GlobeSceneOptions): Promise<Glob
       pool.points.visible = pool.active && !next.reducedMotion;
       if (!stream) continue;
       pool.fromLocal = stream.fromLocal;
-      pool.material.color.setHex(stream.color);
+      (pool.material.uniforms.uColor.value as THREE.Color).setHex(stream.color);
       // Monotonic, gently mapped, and hard-clamped at both ends. A 10x faster
       // link looks livelier; it does not look 10x faster.
       const mbps = stream.mbps === null ? 0 : Math.max(0, stream.mbps);
@@ -628,7 +660,11 @@ export async function createGlobeScene(options: GlobeSceneOptions): Promise<Glob
 
       // `gl_PointSize` is in device pixels, so the dots key off the reference
       // height for the same reason: they belong to the globe, not the canvas.
-      cloudMaterial.uniforms.uScale.value = referenceHeight * pixelRatio * 0.055;
+      const pointScale = referenceHeight * pixelRatio * 0.055;
+      cloudMaterial.uniforms.uScale.value = pointScale;
+      // Particles share the cloud's scale so they never drift out of
+      // proportion with the world dots on a resize or a DPR change.
+      for (const pool of pools) pool.material.uniforms.uScale.value = pointScale;
       renderStatic();
     },
 
