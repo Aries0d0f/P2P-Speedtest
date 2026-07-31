@@ -1,14 +1,13 @@
 import { act, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import type { StageProgressSnapshot } from "~/lib/control-channel";
-import { DOWNLOAD, DUPLEX, UPLOAD, edgeKey, type Slot, type StageId } from "~/lib/stage";
-import { emptySpeedSeries, recordSample, type SpeedSeriesState } from "~/lib/speed-series";
-import {
-  selectLiveTestPresentation,
-  type LiveTestPresentation,
-  type LiveTestRoomView,
-} from "~/lib/test-visualization";
+import type { StageProgress } from "~/model/measurement.model";
+import type { Slot } from "~/model/signaling.model";
+import { DOWNLOAD, DUPLEX, UPLOAD, edgeKey, type StageId } from "~/model/stage.model";
+import { emptySpeedSeries, recordSample } from "~/lib/speed-series";
+import type { SpeedSeriesState } from "~/model/speed-series.model";
+import { selectLiveTestPresentation } from "~/lib/presentation-selector";
+import type { LiveTestPresentation, LiveTestRoomView } from "~/model/presentation.model";
 
 import { RealtimeSpeedGraph } from "./RealtimeSpeedGraph";
 import { SpeedGauge } from "./SpeedGauge";
@@ -20,7 +19,7 @@ function snapshot(
   receiverSlot: Slot,
   bytes: number,
   elapsedMs = 1000,
-): StageProgressSnapshot {
+): StageProgress {
   return { stageId, receiverSlot, bytes, elapsedMs, chunksSeen: 100, highestSeqPlusOne: 100 };
 }
 
@@ -29,13 +28,12 @@ function presentationFor(over: Partial<LiveTestRoomView> = {}, localSlot: Slot =
     runId: RUN,
     phase: "testing",
     stageId: null,
-    progressRunId: RUN,
-    progress: {},
+    stageProgress: { runId: RUN, entries: {} },
     liveLatency: null,
     latencyBaseline: undefined,
     connectionType: "DIRECT",
-    localProfile: { name: "Local" },
-    remoteProfile: { name: "Remote" },
+    selfProfile: { name: "Local" },
+    otherProfile: { name: "Remote" },
     ...over,
   };
   return selectLiveTestPresentation(view, localSlot);
@@ -57,7 +55,7 @@ describe("SpeedGauge", () => {
   it("renders one channel for a directional stage", () => {
     const presentation = presentationFor({
       stageId: DOWNLOAD,
-      progress: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1, 1_250_000) },
+      stageProgress: { runId: RUN, entries: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1, 1_250_000) } },
     });
     render(<SpeedGauge presentation={presentation} ceiling={50} reducedMotion />);
 
@@ -69,10 +67,10 @@ describe("SpeedGauge", () => {
   it("renders two separately labelled duplex channels and never a total", () => {
     const presentation = presentationFor({
       stageId: DUPLEX,
-      progress: {
+      stageProgress: { runId: RUN, entries: {
         [edgeKey(DUPLEX, 0)]: snapshot(DUPLEX, 0, 1_250_000),
         [edgeKey(DUPLEX, 1)]: snapshot(DUPLEX, 1, 2_500_000),
-      },
+      } },
     });
     render(<SpeedGauge presentation={presentation} ceiling={50} reducedMotion />);
 
@@ -95,7 +93,7 @@ describe("SpeedGauge", () => {
   it("shows a genuine zero reading as a number", () => {
     const presentation = presentationFor({
       stageId: UPLOAD,
-      progress: { [edgeKey(UPLOAD, 0)]: snapshot(UPLOAD, 0, 0) },
+      stageProgress: { runId: RUN, entries: { [edgeKey(UPLOAD, 0)]: snapshot(UPLOAD, 0, 0) } },
     });
     render(<SpeedGauge presentation={presentation} ceiling={50} reducedMotion />);
     expect(screen.getByTestId(`gauge-value-${edgeKey(UPLOAD, 0)}`).textContent).toBe("0.00");
@@ -105,10 +103,10 @@ describe("SpeedGauge", () => {
   it("distinguishes receive from send without colour", () => {
     const presentation = presentationFor({
       stageId: DUPLEX,
-      progress: {
+      stageProgress: { runId: RUN, entries: {
         [edgeKey(DUPLEX, 0)]: snapshot(DUPLEX, 0, 1_250_000),
         [edgeKey(DUPLEX, 1)]: snapshot(DUPLEX, 1, 1_250_000),
-      },
+      } },
     });
     render(<SpeedGauge presentation={presentation} ceiling={50} reducedMotion />);
 
@@ -126,7 +124,7 @@ describe("SpeedGauge", () => {
   it("writes the final needle position synchronously under reduced motion", () => {
     const presentation = presentationFor({
       stageId: DOWNLOAD,
-      progress: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1, 1_250_000) },
+      stageProgress: { runId: RUN, entries: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1, 1_250_000) } },
     });
     render(<SpeedGauge presentation={presentation} ceiling={20} reducedMotion />);
 
@@ -145,12 +143,12 @@ describe("SpeedGauge", () => {
 describe("RealtimeSpeedGraph", () => {
   it("draws one polyline per stage and edge, never joining stages", () => {
     const state = seriesFrom([
-      presentationFor({ stageId: DOWNLOAD, progress: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1, 1_250_000) } }),
+      presentationFor({ stageId: DOWNLOAD, stageProgress: { runId: RUN, entries: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1, 1_250_000) } } }),
       presentationFor({
         stageId: DOWNLOAD,
-        progress: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1, 2_500_000, 2000) },
+        stageProgress: { runId: RUN, entries: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1, 2_500_000, 2000) } },
       }),
-      presentationFor({ stageId: UPLOAD, progress: { [edgeKey(UPLOAD, 0)]: snapshot(UPLOAD, 0, 1_250_000) } }),
+      presentationFor({ stageId: UPLOAD, stageProgress: { runId: RUN, entries: { [edgeKey(UPLOAD, 0)]: snapshot(UPLOAD, 0, 1_250_000) } } }),
     ]);
 
     render(<RealtimeSpeedGraph state={state} reducedMotion />);
@@ -165,14 +163,14 @@ describe("RealtimeSpeedGraph", () => {
 
   it("overlays the stages from a common origin instead of stringing them out", () => {
     const state = seriesFrom([
-      presentationFor({ stageId: DOWNLOAD, progress: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1, 1_250_000) } }),
+      presentationFor({ stageId: DOWNLOAD, stageProgress: { runId: RUN, entries: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1, 1_250_000) } } }),
       presentationFor({
         stageId: DOWNLOAD,
-        progress: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1, 2_500_000, 2000) },
+        stageProgress: { runId: RUN, entries: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1, 2_500_000, 2000) } },
       }),
       // A much later stage: end-to-end layout would push this to the right
       // and leave most of the plot empty.
-      presentationFor({ stageId: UPLOAD, progress: { [edgeKey(UPLOAD, 0)]: snapshot(UPLOAD, 0, 1_250_000) } }),
+      presentationFor({ stageId: UPLOAD, stageProgress: { runId: RUN, entries: { [edgeKey(UPLOAD, 0)]: snapshot(UPLOAD, 0, 1_250_000) } } }),
     ]);
     render(<RealtimeSpeedGraph state={state} reducedMotion />);
 
@@ -186,10 +184,10 @@ describe("RealtimeSpeedGraph", () => {
     const state = seriesFrom([
       presentationFor({
         stageId: DUPLEX,
-        progress: {
+        stageProgress: { runId: RUN, entries: {
           [edgeKey(DUPLEX, 0)]: snapshot(DUPLEX, 0, 1_250_000),
           [edgeKey(DUPLEX, 1)]: snapshot(DUPLEX, 1, 2_500_000),
-        },
+        } },
       }),
     ]);
     render(<RealtimeSpeedGraph state={state} reducedMotion />);
@@ -206,7 +204,7 @@ describe("RealtimeSpeedGraph", () => {
     const state = seriesFrom([
       presentationFor({
         stageId: DOWNLOAD,
-        progress: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1, 11_250_000) },
+        stageProgress: { runId: RUN, entries: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1, 11_250_000) } },
       }),
     ]);
     expect(state.ceiling).toBe(100);
@@ -224,7 +222,7 @@ describe("RealtimeSpeedGraph", () => {
 
   it("writes the readout synchronously under reduced motion", () => {
     const state = seriesFrom([
-      presentationFor({ stageId: DOWNLOAD, progress: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1, 1_250_000) } }),
+      presentationFor({ stageId: DOWNLOAD, stageProgress: { runId: RUN, entries: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1, 1_250_000) } } }),
     ]);
     render(<RealtimeSpeedGraph state={state} reducedMotion />);
     expect(screen.getByTestId(`readout-${edgeKey(DOWNLOAD, 1)}`).textContent).toBe("10.0");
@@ -237,7 +235,7 @@ describe("Anime.js, driven by the real engine", () => {
     // synchronous reduced-motion path works.
     const presentation = presentationFor({
       stageId: DOWNLOAD,
-      progress: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1, 12_500_000) },
+      stageProgress: { runId: RUN, entries: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1, 12_500_000) } },
     });
     render(<SpeedGauge presentation={presentation} ceiling={100} />);
 
@@ -253,10 +251,10 @@ describe("Anime.js, driven by the real engine", () => {
     const state = seriesFrom([
       presentationFor({
         stageId: DUPLEX,
-        progress: {
+        stageProgress: { runId: RUN, entries: {
           [edgeKey(DUPLEX, 0)]: snapshot(DUPLEX, 0, 1_250_000),
           [edgeKey(DUPLEX, 1)]: snapshot(DUPLEX, 1, 2_500_000),
-        },
+        } },
       }),
     ]);
     const { unmount } = render(<RealtimeSpeedGraph state={state} />);
