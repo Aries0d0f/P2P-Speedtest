@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   BULK_FRAME_HEADER_BYTES,
+  type BulkChannel,
+  type BulkFrame,
+} from "~/model/bulk-frame.model";
+import {
   BulkReceiver,
   BulkSender,
   encodeBulkFrame,
@@ -9,8 +13,6 @@ import {
   PROGRESS_INTERVAL_MS,
   QUIET_PERIOD_MS,
   RAMP_UP_MS,
-  type BulkChannel,
-  type BulkFrame,
 } from "./throughput";
 import { uuidToBytes } from "./uuid-bytes";
 

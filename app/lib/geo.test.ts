@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fetchGeo, prefetchGeo, projectGeoForAnonymous, resetGeoPrefetch, sanitizeGeo } from "./geo";
+import { projectGeoForAnonymous, sanitizeGeo } from "~/model/geo.model";
+import { fetchGeo, prefetchGeo, resetGeoPrefetch } from "./geo";
 
 beforeEach(() => {
   resetGeoPrefetch();

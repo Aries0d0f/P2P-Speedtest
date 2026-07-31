@@ -1,38 +1,19 @@
 /**
- * Symmetric ping/pong latency measurement over the control channel (3.1,
- * 3.2). Phase 2 creates the channel; this module owns everything that runs
- * over it from here on, plus the two-sided `channel-ready` barrier that
- * gates the first ping.
+ * Symmetric ping/pong latency over the control channel (3.1, 3.2), plus the
+ * two-sided `channel-ready` barrier that gates the first ping.
  *
- * Both peers run the identical loop concurrently — send pings, echo pongs,
- * compute RTT from their own clock only — so there is no "who samples"
- * role and clock skew can never be mistaken for latency (03-latency
- * design notes).
+ * Both peers run the identical loop concurrently and compute RTT from their
+ * own clock only, so there is no "who samples" role and clock skew can never
+ * be mistaken for latency.
  */
 
-// Ship exactly this vocabulary: the four message types this phase
-// implements, plus every name Phase 4 reserves. A union with fewer names
-// would have to be widened by the phase it was meant to serve; anything not
-// in this list is rejected outright by `decodeLatencyMessage` rather than
-// silently accepted.
-export const CONTROL_MESSAGE_TYPES = [
-  "channel-ready",
-  "ping",
-  "pong",
-  "latency-ready",
-  "stage-prepare",
-  "stage-armed",
-  "stage-start",
-  "stage-complete",
-  "measurement-progress",
-  "stage-result",
-  "stage-result-ack",
-  "peer-profile",
-  "test-abort",
-  "result-share",
-] as const;
-
-export type ControlMessageType = (typeof CONTROL_MESSAGE_TYPES)[number];
+import type {
+  LatencyAggregate,
+  LiveLatency,
+  Sample,
+} from "~/model/measurement.model";
+import type { LatencyMessage } from "~/model/control-message.model";
+import { encodeControlMessage } from "./control-message";
 
 // --- Bounded sampling window (3.2 design table) ----------------------------
 
@@ -50,16 +31,6 @@ const PEER_READY_TIMEOUT_MS = 6_000;
 
 // --- Aggregation ------------------------------------------------------------
 
-export interface Sample {
-  seq: number;
-  rttMs: number;
-}
-
-export interface Aggregate {
-  rttMs: number;
-  jitterMs: number;
-}
-
 function median(values: readonly number[]): number {
   const sorted = [...values].sort((a, b) => a - b);
   const mid = Math.floor(sorted.length / 2);
@@ -75,142 +46,29 @@ function meanAbsoluteDifference(values: readonly number[]): number {
   return sum / (values.length - 1);
 }
 
-/**
- * The shared aggregation rule (3.2): median RTT and mean-absolute-difference
- * jitter over a window of samples in arrival order. A pure function over
- * whatever window the caller collected — Phase 4 reuses this exact rule per
- * stage, not just for the idle baseline here. Fewer than MIN_SAMPLES has no
- * meaningful median or jitter and returns `null` rather than a distorted
- * number that would be misread as a real measurement.
- */
-export function aggregateSamples(samples: readonly Sample[]): Aggregate | null {
+/** Median RTT and mean-absolute-difference jitter, in arrival order. Fewer
+ * than MIN_SAMPLES returns `null` rather than a distorted number that would
+ * be misread as a real measurement. Reused per stage, not just here. */
+export function aggregateSamples(samples: readonly Sample[]): LatencyAggregate | null {
   if (samples.length < MIN_SAMPLES) return null;
   const rtts = samples.map((s) => s.rttMs);
   return { rttMs: median(rtts), jitterMs: meanAbsoluteDifference(rtts) };
 }
 
-// --- Wire messages ----------------------------------------------------------
-
-export interface ChannelReadyMessage {
-  runId: string;
-  type: "channel-ready";
-  payload: Record<string, never>;
-}
-export interface PingMessage {
-  runId: string;
-  type: "ping";
-  seq: number;
-  payload: Record<string, never>;
-}
-export interface PongMessage {
-  runId: string;
-  type: "pong";
-  seq: number;
-  payload: Record<string, never>;
-}
-export interface LatencyReadyMessage {
-  runId: string;
-  type: "latency-ready";
-  payload: { aggregate: Aggregate | null };
-}
-
-export type LatencyMessage =
-  | ChannelReadyMessage
-  | PingMessage
-  | PongMessage
-  | LatencyReadyMessage;
-
-interface RawMessage {
-  runId?: unknown;
-  type?: unknown;
-  seq?: unknown;
-  payload?: unknown;
-}
-
-function isKnownControlType(value: unknown): value is ControlMessageType {
-  return (
-    typeof value === "string" && (CONTROL_MESSAGE_TYPES as readonly string[]).includes(value)
-  );
-}
-
-/** Returns `null` for a malformed message, a stale/foreign `runId`, a type
- * outside the whole control vocabulary, or a known type this phase doesn't
- * own (`peer-profile`, or one of Phase 4's reserved names) — the caller
- * never has to trust what an untrusted peer sent. */
-function extractAggregate(payload: unknown): Aggregate | null | undefined {
-  if (typeof payload !== "object" || payload === null) return undefined;
-  const value = payload as Record<string, unknown>;
-  if (value.aggregate === null) return null;
-  const agg = value.aggregate;
-  if (typeof agg !== "object" || agg === null) return undefined;
-  const a = agg as Record<string, unknown>;
-  if (
-    typeof a.rttMs !== "number" ||
-    typeof a.jitterMs !== "number" ||
-    !Number.isFinite(a.rttMs) ||
-    !Number.isFinite(a.jitterMs)
-  ) {
-    return undefined;
-  }
-  return { rttMs: a.rttMs, jitterMs: a.jitterMs };
-}
-
-export function decodeLatencyMessage(data: unknown, runId: string): LatencyMessage | null {
-  if (typeof data !== "string") return null;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(data);
-  } catch {
-    return null;
-  }
-  if (typeof parsed !== "object" || parsed === null) return null;
-  const value = parsed as RawMessage;
-
-  if (!isKnownControlType(value.type)) return null;
-  if (value.runId !== runId) return null;
-
-  switch (value.type) {
-    case "channel-ready":
-      return { runId, type: "channel-ready", payload: {} };
-    case "ping":
-    case "pong": {
-      if (typeof value.seq !== "number" || !Number.isInteger(value.seq) || value.seq < 0) {
-        return null;
-      }
-      return { runId, type: value.type, seq: value.seq, payload: {} };
-    }
-    case "latency-ready": {
-      const aggregate = extractAggregate(value.payload);
-      if (aggregate === undefined) return null;
-      return { runId, type: "latency-ready", payload: { aggregate } };
-    }
-    default:
-      return null;
-  }
-}
-
 // --- Session -----------------------------------------------------------------
-
-export interface LiveLatency {
-  rttMs: number;
-  jitterMs: number | null;
-  sampleCount: number;
-}
 
 export type LatencyTerminalReason = "latency-ready-timeout" | "control-closed" | "run-ended";
 
-/** The one immutable handoff this phase exposes to Phase 4's terminal
- * accumulator (3.2 design notes). "ready" is the normal path: both sides
- * finalized and exchanged `latency-ready`. "terminal" covers a missing peer
- * `latency-ready`, the control channel closing, or a post-start
- * `run-ended` — each freezes whatever samples already arrived rather than
- * hanging or discarding a partial result. */
+/** "ready" is the normal path: both sides exchanged `latency-ready`.
+ * "terminal" covers a missing peer `latency-ready`, the control channel
+ * closing, or a post-start `run-ended` — each freezes whatever samples
+ * arrived rather than hanging or discarding a partial result. */
 export type LatencyHandoff =
-  | { kind: "ready"; baseline: Aggregate | null }
+  | { kind: "ready"; baseline: LatencyAggregate | null }
   | {
       kind: "terminal";
       reason: LatencyTerminalReason;
-      baseline: Aggregate | null;
+      baseline: LatencyAggregate | null;
       sampleCount: number;
     };
 
@@ -253,8 +111,8 @@ export class LatencySession {
   private deadlineTimer: ReturnType<typeof setTimeout> | null = null;
   private peerReadyTimer: ReturnType<typeof setTimeout> | null = null;
 
-  private localAggregate: Aggregate | null | undefined;
-  private peerAggregate: Aggregate | null | undefined;
+  private localAggregate: LatencyAggregate | null | undefined;
+  private peerAggregate: LatencyAggregate | null | undefined;
 
   constructor(opts: LatencySessionOptions) {
     this.runId = opts.runId;
@@ -262,11 +120,9 @@ export class LatencySession {
     this.callbacks = opts.callbacks ?? {};
   }
 
-  /** Call once this side has sent its required initial `peer-profile` and
-   * validated the peer's — the first half of the two-sided barrier (3-2.6).
-   * Sampling starts only once the peer's own `channel-ready` has also been
-   * received; both sides decide independently from the same two facts, so
-   * no coordinator is needed. */
+  /** The first half of the two-sided barrier: call once this side has sent
+   * its initial `peer-profile` and validated the peer's. Both sides decide
+   * independently from the same two facts, so no coordinator is needed. */
   sendChannelReady(): void {
     if (this.sentChannelReady) return;
     this.sentChannelReady = true;
@@ -274,7 +130,7 @@ export class LatencySession {
     this.maybeStart();
   }
 
-  /** Dispatches an already-decoded message from `decodeLatencyMessage`. */
+  /** Dispatches an already-decoded message. */
   handleMessage(msg: LatencyMessage): void {
     switch (msg.type) {
       case "channel-ready":
@@ -298,14 +154,10 @@ export class LatencySession {
     }
   }
 
-  /** Post-start failure path (3.2): a missing peer `latency-ready`, the
-   * control channel closing, or `run-ended` after sampling began. Snapshots
-   * whatever samples already arrived before anything is cleared, and never
-   * delivers more than one handoff — idempotent by construction, since
-   * `state` only ever leaves "sampling"/"awaiting-peer" once. Before
-   * sampling starts (`state === "idle"`) this is a no-op: no measurement
-   * boundary has been crossed yet, and Phase 2's pre-measurement path
-   * writes nothing regardless. */
+  /** Snapshots whatever samples arrived before anything is cleared, and
+   * never delivers more than one handoff — `state` only leaves
+   * "sampling"/"awaiting-peer" once. A no-op while still `idle`: no
+   * measurement boundary has been crossed yet. */
   freezeForTerminal(reason: LatencyTerminalReason): void {
     if (this.state === "idle" || this.state === "done" || this.state === "terminal") return;
     this.state = "terminal";
@@ -432,7 +284,7 @@ export class LatencySession {
 
   private send(msg: LatencyMessage): void {
     try {
-      this.sendRaw(JSON.stringify(msg));
+      this.sendRaw(encodeControlMessage(msg));
     } catch {
       // Channel already closed — the close/terminal path handles this.
     }

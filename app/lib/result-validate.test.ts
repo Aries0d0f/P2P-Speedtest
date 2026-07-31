@@ -1,6 +1,29 @@
 import { describe, expect, it } from "vitest";
+import type { ResultPeer } from "~/model/result.model";
 import { computeResultHash } from "./result-hash";
-import { validateData, validateEnvelope } from "./result-validate";
+import { p2pSpeedtestResultV1Schema, validateData, validateEnvelope } from "./result-validate";
+
+// `peer` is `additionalProperties: false`, so a `ResultPeer` that gained a key
+// would fail at IndexedDB write time rather than at compile time. This pins
+// the key set both ways.
+type SchemaPeerKeys = "id" | "name" | "ua" | "ip" | "protocol" | "geo";
+type _ExactPeerKeys = [keyof ResultPeer] extends [SchemaPeerKeys]
+  ? [SchemaPeerKeys] extends [keyof ResultPeer]
+    ? true
+    : never
+  : never;
+const _assertExactPeerKeys: _ExactPeerKeys = true;
+void _assertExactPeerKeys;
+
+describe("ResultPeer / schema peer", () => {
+  it("has exactly the schema's peer property set", () => {
+    const schema = p2pSpeedtestResultV1Schema as {
+      $defs: { peer: { properties: Record<string, unknown> } };
+    };
+    const expected: SchemaPeerKeys[] = ["id", "name", "ua", "ip", "protocol", "geo"];
+    expect(Object.keys(schema.$defs.peer.properties).sort()).toEqual([...expected].sort());
+  });
+});
 
 const ROOM = "4G7QZKX9M";
 const PEER_A = "3f29a1c4-5e6b-5a2d-9f3e-1b7c8d4a2e10";

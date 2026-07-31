@@ -1,67 +1,21 @@
 /**
- * The bounded, run-scoped series behind the live graph and gauge
- * (06-live-test-visualization 6.4).
+ * The bounded, run-scoped series behind the live graph and gauge (6.4).
  *
- * A pure reducer, deliberately: the widgets animate, but what they animate is
- * decided here, where duplication, stage boundaries, run resets and the
- * y-scale can be reasoned about and tested without a DOM or a clock. Time is
- * an input, never read from `Date.now()`.
- *
- * Three properties matter most:
- *
- * - **Bounded.** Memory and DOM stay flat across a long run: each series
- *   decimates in place rather than growing, and a run can only ever produce
- *   four series (one per directional stage, two for duplex).
- * - **Stage-separated.** Each `(stage, edge)` is its own series, so no
- *   misleading diagonal ever connects the end of one stage to the start of
- *   the next.
- * - **Monotonic scale.** The ceiling may rise during a run but never falls,
- *   so an earlier stage stays visually comparable with a later one.
+ * A pure reducer, so duplication, stage boundaries, run resets and the y-scale
+ * are testable without a DOM or a clock. Time is an input, never `Date.now()`.
+ * Three properties carry it: each series decimates in place rather than
+ * growing, each `(stage, edge)` is its own series so no misleading diagonal
+ * joins two stages, and the ceiling rises but never falls so an earlier stage
+ * stays comparable with a later one.
  */
 
-import type { StageId } from "~/lib/stage";
-import type { TransferChannel, TransferToken } from "~/lib/test-visualization";
-
-/** Points kept per series before decimation halves the resolution. At Phase
- * 4's four updates a second, this is a full minute of a single stage. */
-export const MAX_POINTS_PER_SERIES = 240;
-
-export interface SeriesPoint {
-  /** Milliseconds since this *series'* first sample — not the run's. Each
-   * stage is plotted from its own zero so the three overlay for comparison
-   * instead of being strung out along the run with dead gaps between them. */
-  t: number;
-  mbps: number;
-}
-
-export interface Series {
-  /** `edgeKey(stageId, receiverSlot)` — unique within a run. */
-  key: string;
-  stageId: StageId;
-  role: "receive" | "send";
-  token: TransferToken;
-  label: string;
-  /** Wall clock of this series' first sample; the origin of its own `t`. */
-  originMs: number;
-  points: SeriesPoint[];
-  /** Every `stride`-th sample is kept; doubles when the buffer fills. */
-  stride: number;
-  /** Samples seen, including those decimated away. */
-  seen: number;
-  /** Dedup guard: the last snapshot identity folded in. */
-  lastSampleKey: string | null;
-}
-
-export interface SpeedSeriesState {
-  runId: string | null;
-  /** In first-sample order, so stages read left to right. */
-  series: Series[];
-  /** Monotonic "nice" y-axis ceiling in Mbps. */
-  ceiling: number;
-  /** The longest series' duration — the shared x-axis extent. Monotonic, so
-   * a later short stage never squeezes an earlier long one. */
-  spanMs: number;
-}
+import type { TransferChannel } from "~/model/presentation.model";
+import {
+  MAX_POINTS_PER_SERIES,
+  type Series,
+  type SeriesPoint,
+  type SpeedSeriesState,
+} from "~/model/speed-series.model";
 
 const INITIAL_CEILING = 1;
 
@@ -69,14 +23,9 @@ export function emptySpeedSeries(): SpeedSeriesState {
   return { runId: null, series: [], ceiling: INITIAL_CEILING, spanMs: 0 };
 }
 
-/**
- * The smallest 1/2/5 × 10ⁿ value at or above `mbps`.
- *
- * No extra headroom is baked in: the coarse steps already leave plenty for
- * any real reading, and padding the number would push, say, 180 Mbps onto a
- * 500 Mbps axis. The graph reserves its own top margin so a trace that lands
- * exactly on the ceiling is still drawn inside the plot area.
- */
+/** The smallest 1/2/5 × 10ⁿ value at or above `mbps`. No headroom is baked
+ * in — padding would push 180 Mbps onto a 500 Mbps axis; the graph reserves
+ * its own top margin instead. */
 export function niceCeiling(mbps: number): number {
   if (!Number.isFinite(mbps) || mbps <= 0) return INITIAL_CEILING;
   const exponent = Math.floor(Math.log10(mbps));
@@ -97,13 +46,9 @@ export interface RecordInput {
   channels: readonly TransferChannel[];
 }
 
-/**
- * Folds one render's worth of channels into the series.
- *
- * Returns the *same* state object when nothing changed, so a React consumer
- * can bail out of a re-render cheaply. Channels without a reading contribute
- * nothing — a missing sample is never recorded as zero.
- */
+/** Returns the *same* state object when nothing changed, so a React consumer
+ * can bail out cheaply. A channel without a reading contributes nothing — a
+ * missing sample is never recorded as zero. */
 export function recordSample(state: SpeedSeriesState, input: RecordInput): SpeedSeriesState {
   // A new run wipes everything: no earlier run's trace, ceiling, or origin can
   // survive into the next one.

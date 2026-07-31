@@ -4,15 +4,14 @@ import {
   buildInitialProfileMessage,
   defaultNameForLevel,
   defaultProfile,
-  fallbackPeerName,
   loadStoredProfile,
   nameFromUserAgent,
   sanitizeIncomingProfile,
   saveProfile,
   validateInitialProfile,
-  type ConfirmedProfile,
 } from "./peer-profile";
-import type { OwnAddress } from "./webrtc";
+import { fallbackPeerName, type ConfirmedProfile } from "~/model/peer.model";
+import type { OwnAddress } from "~/model/connection.model";
 
 const CHROME_MAC_UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
