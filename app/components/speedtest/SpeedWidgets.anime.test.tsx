@@ -1,14 +1,13 @@
 import { render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { StageProgressSnapshot } from "~/lib/control-channel";
-import { DOWNLOAD, DUPLEX, edgeKey, type Slot, type StageId } from "~/lib/stage";
-import { emptySpeedSeries, recordSample, type SpeedSeriesState } from "~/lib/speed-series";
-import {
-  selectLiveTestPresentation,
-  type LiveTestPresentation,
-  type LiveTestRoomView,
-} from "~/lib/test-visualization";
+import type { StageProgress } from "~/model/measurement.model";
+import type { Slot } from "~/model/signaling.model";
+import { DOWNLOAD, DUPLEX, edgeKey, type StageId } from "~/model/stage.model";
+import { emptySpeedSeries, recordSample } from "~/lib/speed-series";
+import type { SpeedSeriesState } from "~/model/speed-series.model";
+import { selectLiveTestPresentation } from "~/lib/presentation-selector";
+import type { LiveTestPresentation, LiveTestRoomView } from "~/model/presentation.model";
 
 /**
  * Anime.js instance hygiene (06-live-test-visualization 6.4).
@@ -52,7 +51,7 @@ const { SpeedGauge } = await import("./SpeedGauge");
 
 const RUN = "run-1";
 
-function snapshot(stageId: StageId, receiverSlot: Slot, bytes: number, elapsedMs = 1000): StageProgressSnapshot {
+function snapshot(stageId: StageId, receiverSlot: Slot, bytes: number, elapsedMs = 1000): StageProgress {
   return { stageId, receiverSlot, bytes, elapsedMs, chunksSeen: 100, highestSeqPlusOne: 100 };
 }
 
@@ -61,13 +60,12 @@ function presentationFor(over: Partial<LiveTestRoomView> = {}, localSlot: Slot =
     runId: RUN,
     phase: "testing",
     stageId: null,
-    progressRunId: RUN,
-    progress: {},
+    stageProgress: { runId: RUN, entries: {} },
     liveLatency: null,
     latencyBaseline: undefined,
     connectionType: "DIRECT",
-    localProfile: { name: "Local" },
-    remoteProfile: { name: "Remote" },
+    selfProfile: { name: "Local" },
+    otherProfile: { name: "Remote" },
     ...over,
   };
   return selectLiveTestPresentation(view, localSlot);
@@ -89,7 +87,7 @@ describe("gauge", () => {
   const withBytes = (bytes: number, elapsedMs: number) =>
     presentationFor({
       stageId: DOWNLOAD,
-      progress: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1, bytes, elapsedMs) },
+      stageProgress: { runId: RUN, entries: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1, bytes, elapsedMs) } },
     });
 
   it("creates one animatable per channel and retargets it thereafter", () => {
@@ -119,10 +117,10 @@ describe("gauge", () => {
       <SpeedGauge
         presentation={presentationFor({
           stageId: DUPLEX,
-          progress: {
+          stageProgress: { runId: RUN, entries: {
             [edgeKey(DUPLEX, 0)]: snapshot(DUPLEX, 0, 1_250_000),
             [edgeKey(DUPLEX, 1)]: snapshot(DUPLEX, 1, 2_500_000),
-          },
+          } },
         })}
         ceiling={100}
       />,
@@ -138,7 +136,7 @@ describe("gauge", () => {
       <SpeedGauge
         presentation={presentationFor({
           stageId: DUPLEX,
-          progress: { [edgeKey(DUPLEX, 0)]: snapshot(DUPLEX, 0, 1_250_000) },
+          stageProgress: { runId: RUN, entries: { [edgeKey(DUPLEX, 0)]: snapshot(DUPLEX, 0, 1_250_000) } },
         })}
         ceiling={100}
       />,
@@ -154,7 +152,7 @@ describe("graph", () => {
     let state = seriesFrom([
       presentationFor({
         stageId: DOWNLOAD,
-        progress: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1, 1_250_000) },
+        stageProgress: { runId: RUN, entries: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1, 1_250_000) } },
       }),
     ]);
     const { rerender } = render(<RealtimeSpeedGraph state={state} />);
@@ -166,7 +164,7 @@ describe("graph", () => {
         nowMs: i * 250,
         channels: presentationFor({
           stageId: DOWNLOAD,
-          progress: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1, 1_250_000 * i, 1000) },
+          stageProgress: { runId: RUN, entries: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1, 1_250_000 * i, 1000) } },
         }).channels,
       });
       rerender(<RealtimeSpeedGraph state={state} />);
@@ -180,10 +178,10 @@ describe("graph", () => {
     const state = seriesFrom([
       presentationFor({
         stageId: DUPLEX,
-        progress: {
+        stageProgress: { runId: RUN, entries: {
           [edgeKey(DUPLEX, 0)]: snapshot(DUPLEX, 0, 1_250_000),
           [edgeKey(DUPLEX, 1)]: snapshot(DUPLEX, 1, 2_500_000),
-        },
+        } },
       }),
     ]);
     const { unmount } = render(<RealtimeSpeedGraph state={state} />);

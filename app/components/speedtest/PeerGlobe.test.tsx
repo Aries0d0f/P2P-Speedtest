@@ -2,28 +2,21 @@ import { StrictMode } from "react";
 import { act, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { DOWNLOAD, DUPLEX, UPLOAD, edgeKey, type Slot, type StageId } from "~/lib/stage";
-import {
-  selectLiveTestPresentation,
-  type LiveTestPresentation,
-  type LiveTestRoomView,
-} from "~/lib/test-visualization";
-import type { StageProgressSnapshot } from "~/lib/control-channel";
+import type { Slot } from "~/model/signaling.model";
+import { DOWNLOAD, DUPLEX, UPLOAD, edgeKey, type StageId } from "~/model/stage.model";
+import { selectLiveTestPresentation } from "~/lib/presentation-selector";
+import type { LiveTestPresentation, LiveTestRoomView } from "~/model/presentation.model";
+import type { StageProgress } from "~/model/measurement.model";
 
-import { PeerGlobe, buildFrame } from "./PeerGlobe";
-import type {
-  GlobeDiagnostics,
-  GlobeFrame,
-  GlobeScene,
-  GlobeSceneFactory,
-  GlobeSceneOptions,
-} from "./three/globe-scene";
+import { PeerGlobe } from "./PeerGlobe";
+import { buildFrame } from "~/lib/globe-frame";
+import type { GlobeDiagnostics, GlobeFrame, GlobeScene, GlobeSceneFactory, GlobeSceneOptions } from "~/model/globe.model";
 
 const RUN = "run-1";
 const TOKYO = { lat: 35.6762, lon: 139.6503 };
 const BERLIN = { lat: 52.52, lon: 13.405 };
 
-function snapshot(stageId: StageId, receiverSlot: Slot, bytes = 1_250_000): StageProgressSnapshot {
+function snapshot(stageId: StageId, receiverSlot: Slot, bytes = 1_250_000): StageProgress {
   return { stageId, receiverSlot, bytes, elapsedMs: 1000, chunksSeen: 100, highestSeqPlusOne: 100 };
 }
 
@@ -35,13 +28,12 @@ function presentationFor(
     runId: RUN,
     phase: "testing",
     stageId: null,
-    progressRunId: RUN,
-    progress: {},
+    stageProgress: { runId: RUN, entries: {} },
     liveLatency: null,
     latencyBaseline: undefined,
     connectionType: "DIRECT",
-    localProfile: { name: "Local", geo: TOKYO },
-    remoteProfile: { name: "Remote", geo: BERLIN },
+    selfProfile: { name: "Local", geo: TOKYO },
+    otherProfile: { name: "Remote", geo: BERLIN },
     ...over,
   };
   return selectLiveTestPresentation(view, localSlot);
@@ -254,7 +246,7 @@ describe("PeerGlobe — frames", () => {
     // Slot 0 during download is the sender, so packets leave the local marker.
     const { rerender } = render(
       <PeerGlobe
-        presentation={presentationFor({ stageId: DOWNLOAD, progress: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1) } }, 0)}
+        presentation={presentationFor({ stageId: DOWNLOAD, stageProgress: { runId: RUN, entries: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1) } } }, 0)}
         createScene={factory}
       />,
     );
@@ -267,7 +259,7 @@ describe("PeerGlobe — frames", () => {
     // The receiving peer sees the same physical direction: into its marker.
     rerender(
       <PeerGlobe
-        presentation={presentationFor({ stageId: DOWNLOAD, progress: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1) } }, 1)}
+        presentation={presentationFor({ stageId: DOWNLOAD, stageProgress: { runId: RUN, entries: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1) } } }, 1)}
         createScene={factory}
       />,
     );
@@ -285,10 +277,10 @@ describe("PeerGlobe — frames", () => {
         presentation={presentationFor(
           {
             stageId: DUPLEX,
-            progress: {
+            stageProgress: { runId: RUN, entries: {
               [edgeKey(DUPLEX, 0)]: snapshot(DUPLEX, 0),
               [edgeKey(DUPLEX, 1)]: snapshot(DUPLEX, 1, 2_500_000),
-            },
+            } },
           },
           0,
         )}
@@ -326,7 +318,7 @@ describe("PeerGlobe — frames", () => {
     const { factory } = makeFactory();
     const { rerender } = render(
       <PeerGlobe
-        presentation={presentationFor({ stageId: DOWNLOAD, remoteProfile: { name: "Remote" } })}
+        presentation={presentationFor({ stageId: DOWNLOAD, otherProfile: { name: "Remote" } })}
         createScene={factory}
       />,
     );
@@ -335,7 +327,7 @@ describe("PeerGlobe — frames", () => {
 
     rerender(
       <PeerGlobe
-        presentation={presentationFor({ stageId: DOWNLOAD, remoteProfile: { name: "Remote", geo: BERLIN } })}
+        presentation={presentationFor({ stageId: DOWNLOAD, otherProfile: { name: "Remote", geo: BERLIN } })}
         createScene={factory}
       />,
     );
@@ -349,7 +341,7 @@ describe("PeerGlobe — frames", () => {
     const { factory } = makeFactory();
     render(
       <PeerGlobe
-        presentation={presentationFor({ localProfile: { name: "A" }, remoteProfile: { name: "B" } })}
+        presentation={presentationFor({ selfProfile: { name: "A" }, otherProfile: { name: "B" } })}
         createScene={factory}
       />,
     );
@@ -358,7 +350,7 @@ describe("PeerGlobe — frames", () => {
     expect(frame.localLocation).toBeNull();
     expect(frame.remoteLocation).toBeNull();
     // No label is rendered for a peer with no marker.
-    expect(screen.queryByText("A (you)")).toBeNull();
+    expect(screen.queryByText("A (You)")).toBeNull();
   });
 });
 
@@ -443,7 +435,7 @@ describe("PeerGlobe — failure isolation", () => {
 
     rerender(
       <PeerGlobe
-        presentation={presentationFor({ runId: "run-2", progressRunId: "run-2" })}
+        presentation={presentationFor({ runId: "run-2", stageProgress: { runId: "run-2", entries: {} }})}
         createScene={factory}
         onVisualError={onVisualError}
       />,
