@@ -1,9 +1,19 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { fetchGeo, projectGeoForAnonymous, sanitizeGeo } from "./geo";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { fetchGeo, prefetchGeo, projectGeoForAnonymous, resetGeoPrefetch, sanitizeGeo } from "./geo";
+
+beforeEach(() => {
+  resetGeoPrefetch();
+});
 
 afterEach(() => {
   vi.unstubAllGlobals();
 });
+
+function respondWith(body: unknown, status = 200) {
+  const fetchMock = vi.fn(async () => new Response(JSON.stringify(body), { status }));
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
 
 describe("fetchGeo", () => {
   it("fetches from the geo proxy and sanitizes the response", async () => {
@@ -122,5 +132,50 @@ describe("projectGeoForAnonymous", () => {
   it("returns undefined when there is nothing left to project", () => {
     expect(projectGeoForAnonymous({ country: "Testland" })).toBeUndefined();
     expect(projectGeoForAnonymous(null)).toBeUndefined();
+  });
+});
+
+describe("prefetchGeo", () => {
+  const PAYLOAD = { geo: { city: "New Taipei City", lat: 25.0693, lon: 121.4626 } };
+
+  it("looks up once and shares the answer with every later caller", async () => {
+    const fetchMock = respondWith(PAYLOAD);
+
+    // The room page starts this at mount; the control channel awaits it later.
+    const [atMount, atChannelOpen] = await Promise.all([prefetchGeo(), prefetchGeo()]);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(atMount).toEqual(atChannelOpen);
+    expect(atMount?.lat).toBe(25.0693);
+
+    // And a caller arriving after it has already settled still pays nothing.
+    expect(await prefetchGeo()).toEqual(atMount);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries after a failure rather than caching it", async () => {
+    // The whole point of prefetching is that the lookup happens early — which
+    // is also when the network is least settled. A transient failure at mount
+    // must not doom the one that matters, at channel-open time.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("offline");
+      }),
+    );
+    expect(await prefetchGeo()).toBeNull();
+
+    const fetchMock = respondWith(PAYLOAD);
+    expect((await prefetchGeo())?.lat).toBe(25.0693);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("shares nothing on its own — the caller still projects by privacy level", async () => {
+    respondWith(PAYLOAD);
+    const geo = await prefetchGeo();
+    // Full coordinates sit in the module; Anonymous still gets nothing from
+    // them, because the projection happens where the message is built.
+    expect(geo?.lat).toBe(25.0693);
+    expect(projectGeoForAnonymous(geo)).toBeUndefined();
   });
 });

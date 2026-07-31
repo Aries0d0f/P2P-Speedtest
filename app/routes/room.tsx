@@ -14,7 +14,7 @@ import {
   type LiveTestRoomView,
 } from "~/lib/test-visualization";
 import type { GeoInfo } from "~/lib/geo";
-import { fetchGeo } from "~/lib/geo";
+import { prefetchGeo } from "~/lib/geo";
 import {
   decodeLatencyMessage,
   LatencySession,
@@ -280,6 +280,17 @@ export default function Room({ params }: Route.ComponentProps) {
     defaultProfile(USER_AGENT).then(setGateProfile);
   }, []);
 
+  // Start the geo lookup as soon as the room page mounts — during the waiting
+  // screen, and before the visitor has decided whether to join. It is slower
+  // than everything around it, so waiting until the control channel opens
+  // meant the globe sat marker-less for a round trip after pairing. The
+  // result is shared and shares nothing: what leaves this browser is still
+  // decided by the privacy level, at send time.
+  useEffect(() => {
+    if (token === null) return;
+    void prefetchGeo();
+  }, [token]);
+
   const [phase, setPhase] = useState<Phase>("waiting");
   const [terminal, setTerminal] = useState<TerminalState | null>(null);
   const [self, setSelf] = useState<(PeerInfo & { expiresAt: string }) | null>(null);
@@ -304,6 +315,28 @@ export default function Room({ params }: Route.ComponentProps) {
   // both screens agree on which markers exist (S3, S11).
   const [selfProfile, setSelfProfile] = useState<PeerProfileMessage | null>(null);
   const [visualFailed, setVisualFailed] = useState(false);
+
+  // Show this browser's own globe marker as soon as the profile is confirmed
+  // and the prefetched lookup lands — typically well before pairing, so the
+  // waiting screen has something true on it rather than an empty globe.
+  //
+  // Display only. `selfProfileRef`, which authors this peer's entry in the
+  // stored record, is still written solely when a real `peer-profile` message
+  // is sent, so a provisional value can never reach a result. `prev ?? …`
+  // means the real message always wins, whatever order they resolve in.
+  useEffect(() => {
+    if (!confirmedProfile) return;
+    let cancelled = false;
+    void prefetchGeo().then((geo) => {
+      if (cancelled || !geo) return;
+      // No address yet — there is no peer connection to read one from — but
+      // the privacy projection is the same one the wire message uses.
+      setSelfProfile((prev) => prev ?? buildEnrichmentProfileMessage(confirmedProfile, USER_AGENT, {}, geo));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [confirmedProfile]);
 
   const wsRef = useRef<WebSocket | null>(null);
   // 04-throughput revision: genuine parallelism needs independent SCTP
@@ -673,7 +706,9 @@ export default function Room({ params }: Route.ComponentProps) {
       // and a failure anywhere in this tail must never be mistaken for the
       // initial send above already having failed.
       try {
-        const geo = await fetchGeo();
+        // Normally already resolved by the prefetch above, so the enriched
+        // profile goes out on the heels of the initial one.
+        const geo = await prefetchGeo();
         if (terminalRef.current || runIdRef.current !== runId) return;
         const freshAddress = await safeGetOwnAddress();
         if (terminalRef.current || runIdRef.current !== runId) return;

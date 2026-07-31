@@ -112,6 +112,40 @@ export async function fetchGeo(): Promise<GeoInfo | null> {
   }
 }
 
+let inFlight: Promise<GeoInfo | null> | null = null;
+let resolved: GeoInfo | null = null;
+
+/**
+ * The lookup, started once and shared by every later caller.
+ *
+ * The room page kicks this off the moment it mounts — while the visitor is
+ * still reading the waiting screen and deciding whether to join — so by the
+ * time the control channel opens the answer is usually already in hand and
+ * the peer's globe marker appears without a round trip's delay.
+ *
+ * Still just an IP lookup against the same first-party endpoint the app is
+ * served from, and it still shares nothing: the result sits in this module
+ * until `peer-profile` projects it through the sender's privacy level (S3).
+ *
+ * A failed lookup is deliberately *not* cached, so the call at channel-open
+ * time retries rather than inheriting a transient failure from mount.
+ */
+export function prefetchGeo(): Promise<GeoInfo | null> {
+  if (resolved !== null) return Promise.resolve(resolved);
+  inFlight ??= fetchGeo().then((geo) => {
+    resolved = geo;
+    inFlight = null;
+    return geo;
+  });
+  return inFlight;
+}
+
+/** Test seam: drops the shared result so cases cannot leak into each other. */
+export function resetGeoPrefetch(): void {
+  inFlight = null;
+  resolved = null;
+}
+
 /**
  * Anonymous-level projection (S3), applied at the point of parsing rather
  * than the point of sending: an unfiltered `GeoInfo` that merely happens
