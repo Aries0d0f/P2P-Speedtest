@@ -1,31 +1,18 @@
-import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router";
 import { ConnectionBadge } from "~/components/ConnectionBadge";
-import {
-  bpsToMbps,
-  exportResults,
-  importResults,
-  listResults,
-  type BandwidthEdge,
-  type ImportEntryResult,
-  type P2PSpeedtestResult,
-  type ResultStatus,
-} from "~/lib/results";
+import { useResultHistory } from "~/hooks/result-history.hook";
+import { bpsToMbps } from "~/lib/results-store";
+import type {
+  BandwidthEdge,
+  P2PSpeedtestResult,
+  ResultStatus,
+} from "~/model/result.model";
 
 import type { Route } from "./+types/results";
 
 export function meta({}: Route.MetaArgs) {
   return [{ title: "P2P Speedtest — Results" }];
 }
-
-// Client-only storage (5.1): the server has no IndexedDB, so this starts in
-// "loading" both during SSR and on the client's first paint, and only ever
-// resolves after the mount effect below runs — hydration never disagrees
-// with what the server sent.
-type LoadState =
-  | { status: "loading" }
-  | { status: "ok"; results: P2PSpeedtestResult[]; warnings: string[] }
-  | { status: "error"; reason: string };
 
 const STATUS_COPY: Record<ResultStatus, { label: string; className: string }> = {
   SUCCEED: {
@@ -57,28 +44,6 @@ function EdgeLine({ edge }: { edge: BandwidthEdge }) {
       {bpsToMbps(edge.speed)} Mbps · {edge.latency.toFixed(0)} ms · loss {(edge.loss * 100).toFixed(2)}%
     </p>
   );
-}
-
-function keyFor(result: P2PSpeedtestResult): string {
-  return `${result.data.room} ${result.metadata["peer-id"]}`;
-}
-
-function describeImportEntry(entry: ImportEntryResult): string {
-  const n = entry.index + 1;
-  switch (entry.outcome.status) {
-    case "saved":
-      return `Entry ${n}: saved.`;
-    case "deduplicated":
-      return `Entry ${n}: already had this result — skipped.`;
-    case "malformed":
-      return `Entry ${n}: skipped — ${entry.outcome.message}.`;
-    case "unsupported-version":
-      return `Entry ${n}: skipped — ${entry.outcome.message}.`;
-    case "invalid":
-      return `Entry ${n}: rejected — ${entry.outcome.errors.join("; ")}`;
-    case "save-error":
-      return `Entry ${n}: could not be saved (${entry.outcome.reason}).`;
-  }
 }
 
 function ResultRow({
@@ -140,51 +105,18 @@ function ResultRow({
 }
 
 export default function Results({}: Route.ComponentProps) {
-  const [state, setState] = useState<LoadState>({ status: "loading" });
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [importMessages, setImportMessages] = useState<string[]>([]);
-  const [importing, setImporting] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
-
-  async function refresh() {
-    const listed = await listResults();
-    setState(
-      listed.status === "ok"
-        ? { status: "ok", results: listed.results, warnings: listed.warnings }
-        : { status: "error", reason: listed.reason },
-    );
-  }
-
-  useEffect(() => {
-    void refresh();
-  }, []);
-
-  async function handleExport(onlySelected: boolean) {
-    if (state.status !== "ok") return;
-    const keys =
-      onlySelected && selected.size > 0
-        ? state.results
-            .filter((r) => selected.has(keyFor(r)))
-            .map((r): [string, string] => [r.data.room, r.metadata["peer-id"]])
-        : undefined;
-    await exportResults(keys);
-  }
-
-  async function handleImportFile(file: File) {
-    setImporting(true);
-    try {
-      const outcome = await importResults(file);
-      if (outcome.status === "malformed-file") {
-        setImportMessages(["This file isn't a valid export — expected a { results: [...] } JSON file."]);
-        return;
-      }
-      setImportMessages(outcome.entries.map(describeImportEntry));
-      await refresh();
-    } finally {
-      setImporting(false);
-      if (fileInputRef.current) fileInputRef.current.value = "";
-    }
-  }
+  const {
+    state,
+    selected,
+    toggle,
+    exportAll,
+    exportSelected,
+    importFile,
+    importing,
+    messages,
+    keyFor,
+    fileInputRef,
+  } = useResultHistory();
 
   return (
     <main className="flex min-h-screen flex-col items-center gap-8 px-4 py-16">
@@ -200,7 +132,7 @@ export default function Results({}: Route.ComponentProps) {
         <div className="flex flex-wrap gap-2">
           <button
             type="button"
-            onClick={() => void handleExport(false)}
+            onClick={() => void exportAll()}
             disabled={state.status !== "ok" || state.results.length === 0}
             className="rounded-full border border-gray-300 px-4 py-2 text-sm font-medium text-gray-900 disabled:opacity-50 dark:border-gray-600 dark:text-gray-100"
           >
@@ -208,7 +140,7 @@ export default function Results({}: Route.ComponentProps) {
           </button>
           <button
             type="button"
-            onClick={() => void handleExport(true)}
+            onClick={() => void exportSelected()}
             disabled={selected.size === 0}
             className="rounded-full border border-gray-300 px-4 py-2 text-sm font-medium text-gray-900 disabled:opacity-50 dark:border-gray-600 dark:text-gray-100"
           >
@@ -223,7 +155,7 @@ export default function Results({}: Route.ComponentProps) {
             className="hidden"
             onChange={(e) => {
               const file = e.target.files?.[0];
-              if (file) void handleImportFile(file);
+              if (file) void importFile(file);
             }}
           />
           <button
@@ -237,9 +169,9 @@ export default function Results({}: Route.ComponentProps) {
         </div>
       </div>
 
-      {importMessages.length > 0 && (
+      {messages.length > 0 && (
         <div className="flex w-full max-w-2xl flex-col gap-1 rounded-2xl border border-amber-300 bg-amber-50 p-4 text-xs text-amber-800 dark:border-amber-700 dark:bg-amber-900/20 dark:text-amber-300">
-          {importMessages.map((m, i) => (
+          {messages.map((m, i) => (
             <p key={i}>{m}</p>
           ))}
         </div>
@@ -280,14 +212,7 @@ export default function Results({}: Route.ComponentProps) {
                       key={key}
                       result={result}
                       selected={selected.has(key)}
-                      onToggle={() =>
-                        setSelected((prev) => {
-                          const next = new Set(prev);
-                          if (next.has(key)) next.delete(key);
-                          else next.add(key);
-                          return next;
-                        })
-                      }
+                      onToggle={() => toggle(key)}
                     />
                   );
                 })}
