@@ -1,37 +1,14 @@
 /**
- * Pure geographic and orientation math for the peer globe
- * (06-live-test-visualization 6.2).
+ * Pure geographic and orientation math for the peer globe (6.2).
  *
- * Deliberately free of any Three.js import: the same numbers drive the land
- * mask's UVs, the markers, the route, the camera orientation, and the unit
- * tests, and a date-line or antipodal bug is far cheaper to find here than
- * inside a render loop. `create-globe-scene.ts` converts these plain values
- * into `THREE.Vector3`/`THREE.Quaternion` at the boundary.
- *
- * Coordinate convention (shared by everything above, camera on +Z):
- *
- *   x = cos(lat) * sin(lon)
- *   y = sin(lat)                 // +y is the north pole
- *   z = cos(lat) * cos(lon)      // lon 0 faces the camera
+ * Free of any Three.js import: the same numbers drive the mask UVs, markers,
+ * route, camera and the unit tests, and a date-line or antipodal bug is far
+ * cheaper to find here than inside a render loop. Coordinate convention is in
+ * `globe.model.ts`.
  */
 
-export interface Vec3 {
-  x: number;
-  y: number;
-  z: number;
-}
-
-export interface Quat {
-  x: number;
-  y: number;
-  z: number;
-  w: number;
-}
-
-export interface LatLon {
-  lat: number;
-  lon: number;
-}
+import type { GeoPoint } from "~/model/geo.model";
+import type { GlobeLayout, Quat, Vec3 } from "~/model/globe.model";
 
 /** Earth's real axial tilt, the desktop orientation contract's target for the
  * projected north axis (S11). */
@@ -90,29 +67,25 @@ export function normalize(a: Vec3): Vec3 | null {
 }
 
 /** Latitude/longitude in degrees to a point on the unit sphere. */
-export function latLonToVector({ lat, lon }: LatLon): Vec3 {
+export function geoPointToVector({ lat, lon }: GeoPoint): Vec3 {
   const phi = lat * DEG;
   const lambda = lon * DEG;
   const cosPhi = Math.cos(phi);
   return vec(cosPhi * Math.sin(lambda), Math.sin(phi), cosPhi * Math.cos(lambda));
 }
 
-/** The exact inverse of `latLonToVector` for a unit vector. */
-export function vectorToLatLon(v: Vec3): LatLon {
+/** The exact inverse of `geoPointToVector` for a unit vector. */
+export function vectorToGeoPoint(v: Vec3): GeoPoint {
   return {
     lat: Math.asin(clamp(v.y, -1, 1)) / DEG,
     lon: Math.atan2(v.x, v.z) / DEG,
   };
 }
 
-/**
- * Equirectangular UVs for the checked-in land mask, in the same longitude
- * direction as `latLonToVector`. `u = 0` is lon -180 and `v = 0` is the top
- * row of the image (lat +90), which is how the mask is rasterised — see
- * `app/assets/README.md`.
- */
+/** Equirectangular UVs for the checked-in land mask: `u = 0` is lon -180 and
+ * `v = 0` is the top row (lat +90), matching how it is rasterised. */
 export function vectorToUv(v: Vec3): { u: number; v: number } {
-  const { lat, lon } = vectorToLatLon(v);
+  const { lat, lon } = vectorToGeoPoint(v);
   return { u: (lon + 180) / 360, v: (90 - lat) / 180 };
 }
 
@@ -122,11 +95,8 @@ export function angleBetween(a: Vec3, b: Vec3): number {
   return Math.acos(clamp(dot(a, b), -1, 1));
 }
 
-/**
- * An evenly distributed point cloud on the unit sphere (Fibonacci lattice).
- * Deterministic — the same `count` always yields the same points, so a visual
- * regression is a code change rather than a reroll.
- */
+/** Fibonacci lattice on the unit sphere. Deterministic, so a visual
+ * regression is a code change rather than a reroll. */
 export function fibonacciSphere(count: number): Vec3[] {
   const points: Vec3[] = [];
   if (count <= 0) return points;
@@ -168,12 +138,9 @@ export function planRoute(a: Vec3, b: Vec3): RoutePlan {
   return { kind: "arc", theta, lift };
 }
 
-/**
- * A deterministic great-circle plane through `a` for the antipodal case,
- * where the shortest path genuinely is not unique. Prefers the plane through
- * the north pole; falls back to the +x ("east") reference when `a` is itself
- * polar and that plane is undefined.
- */
+/** For the antipodal case, where the shortest path genuinely is not unique.
+ * Prefers the plane through the north pole; falls back to +x when `a` is
+ * itself polar and that plane is undefined. */
 function fallbackPlaneAxis(a: Vec3): Vec3 {
   const north = vec(0, 1, 0);
   const east = vec(1, 0, 0);
@@ -186,12 +153,9 @@ function fallbackPlaneAxis(a: Vec3): Vec3 {
   return normalize(cross(perp, a)) ?? east;
 }
 
-/**
- * The unit-sphere direction at parameter `t` along the minor great-circle arc
- * from `a` to `b`. Because the inputs are unit vectors and the sweep is
- * `acos(dot)`, longitude wrapping picks the short way round automatically —
- * a +179/-179 pair crosses the date line rather than travelling 358°.
- */
+/** Direction at `t` along the minor great-circle arc. Because the sweep is
+ * `acos(dot)` over unit vectors, a +179/-179 pair crosses the date line
+ * rather than travelling 358°. */
 export function routeDirectionAt(a: Vec3, b: Vec3, t: number, plan: RoutePlan): Vec3 {
   if (plan.kind === "shared-location") return a;
   if (plan.kind === "antipodal") {
@@ -205,11 +169,8 @@ export function routeDirectionAt(a: Vec3, b: Vec3, t: number, plan: RoutePlan): 
   return add(scale(a, s0), scale(b, s1));
 }
 
-/**
- * The route point at `t`, raised by `1 + lift * sin(pi * t)`. The envelope is
- * exactly 1 at both ends, so the tube touches each marker, and strictly above
- * the surface everywhere between.
- */
+/** Raised by `1 + lift * sin(pi * t)`: exactly 1 at both ends, so the tube
+ * touches each marker and clears the surface everywhere between. */
 export function routePointAt(a: Vec3, b: Vec3, t: number, plan: RoutePlan): Vec3 {
   const direction = routeDirectionAt(a, b, t, plan);
   return scale(direction, 1 + plan.lift * Math.sin(Math.PI * t));
@@ -312,17 +273,12 @@ export function quatSlerp(a: Quat, b: Quat, t: number): Quat {
 // Orientation contract
 // ---------------------------------------------------------------------------
 
-export type GlobeLayout = "desktop" | "mobile";
-
 const CAMERA_FORWARD: Vec3 = { x: 0, y: 0, z: 1 };
 const WORLD_NORTH: Vec3 = { x: 0, y: 1, z: 0 };
 
-/**
- * A marker is visible when it is on the camera-facing side of the sphere's
- * horizon. For a perspective camera at distance `d` from a unit sphere's
- * centre, the horizon plane sits at `z = 1 / d` — strictly *inside* the naive
- * `z > 0` hemisphere, which is why a wide pair needs the camera pulled back.
- */
+/** The horizon plane sits at `z = 1 / d`, strictly *inside* the naive
+ * `z > 0` hemisphere — which is why a wide pair needs the camera pulled
+ * back. */
 export function isMarkerVisible(v: Vec3, cameraDistance: number): boolean {
   if (!(cameraDistance > 1)) return v.z > 0;
   return v.z > 1 / cameraDistance;
@@ -335,15 +291,10 @@ export const MAX_CAMERA_DISTANCE = 9;
 const HORIZON_MARGIN = 1.12;
 
 /**
- * How far back the camera has to sit for both endpoints to clear the horizon.
- *
- * With the arc midpoint facing the camera each endpoint is `theta / 2` away,
- * so its depth is `cos(theta / 2)` and visibility needs
- * `cos(theta / 2) > 1 / d`. Clamped at both ends: a close pair does not get a
- * pointlessly distant camera, and a near-antipodal pair is capped rather than
- * being pushed to infinity — beyond roughly 166 degrees of separation the two
- * markers genuinely cannot share a frame, and the scene says so instead of
- * flying away.
+ * With the midpoint facing the camera each endpoint is `theta / 2` away, so
+ * visibility needs `cos(theta / 2) > 1 / d`. Clamped at both ends: beyond
+ * roughly 166° of separation the two markers genuinely cannot share a frame,
+ * and the scene says so instead of flying away.
  */
 export function recommendedCameraDistance(a: Vec3 | null, b: Vec3 | null): number {
   if (!a || !b) return MIN_CAMERA_DISTANCE;
@@ -353,10 +304,9 @@ export function recommendedCameraDistance(a: Vec3 | null, b: Vec3 | null): numbe
   return clamp(HORIZON_MARGIN / depth, MIN_CAMERA_DISTANCE, MAX_CAMERA_DISTANCE);
 }
 
-/** Signed angle of the projected north axis from screen vertical, in degrees.
- * Positive leans right (north pole toward +x on screen). `null` when north
- * points at or away from the camera and the projection has no meaningful
- * direction. */
+/** Signed angle of the projected north axis from screen vertical; positive
+ * leans right. `null` when north points at or away from the camera, where the
+ * projection has no meaningful direction. */
 export function projectedNorthTiltDeg(q: Quat): number | null {
   const north = quatRotate(q, WORLD_NORTH);
   if (Math.hypot(north.x, north.y) < DEGENERATE_PROJECTION) return null;
@@ -384,13 +334,10 @@ export interface OrientationResult {
 }
 
 /**
- * The target orientation for the Earth group.
- *
- * Step 1 always aims the arc midpoint (or the single marker) at the camera,
- * which puts every non-antipodal pair in the visible hemisphere. Step 2 uses
- * the one remaining degree of freedom — roll about the camera axis — for the
- * layout-specific constraint. The two constraints cannot both hold, which is
- * exactly why mobile trades the tilt away for self-left/peer-right.
+ * Step 1 aims the arc midpoint at the camera, putting every non-antipodal
+ * pair in the visible hemisphere. Step 2 spends the one remaining degree of
+ * freedom — roll about the camera axis — on the layout's constraint. Both
+ * constraints cannot hold at once, which is why mobile trades the tilt away.
  */
 export function targetOrientation(input: OrientationInput): OrientationResult {
   const { layout, local, remote, previous } = input;
@@ -433,21 +380,16 @@ export function targetOrientation(input: OrientationInput): OrientationResult {
   return { quat: rollAboutCamera(face, -Math.atan2(dy, dx)), reason: "both-markers" };
 }
 
-/**
- * Rotate about the camera axis (+Z in view space) *after* `q`.
- *
- * A positive `angle` turns the world counter-clockwise on screen, which
- * decreases `projectedNorthTiltDeg` by the same amount — hence the sign in
- * `applyTilt` below.
- */
+/** Rotate about the camera axis *after* `q`. A positive `angle` decreases
+ * `projectedNorthTiltDeg` by the same amount — hence the sign in
+ * `applyTilt`. */
 function rollAboutCamera(q: Quat, angle: number): Quat {
   return quatNormalize(quatMultiply(quatFromAxisAngle(CAMERA_FORWARD, angle), q));
 }
 
-/** Roll `face` so the projected north axis sits at Earth's axial tilt. When
- * north points at or away from the camera there is no projected direction and
- * so no tilt to enforce: keep the last stable orientation rather than snapping
- * to an arbitrary roll. */
+/** When north points at or away from the camera there is no projected
+ * direction and so no tilt to enforce: keep the last stable orientation
+ * rather than snapping to an arbitrary roll. */
 function applyTilt(face: Quat, previous: Quat | undefined): { quat: Quat; held: boolean } {
   const current = projectedNorthTiltDeg(face);
   if (current === null) return { quat: previous ?? face, held: previous !== undefined };

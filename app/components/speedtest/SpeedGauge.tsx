@@ -1,59 +1,26 @@
 import { useEffect, useRef } from "react";
 
-import type { LiveTestPresentation, TransferChannel } from "~/lib/test-visualization";
+import { useAnimatedScalar } from "~/hooks/animated-scalar.hook";
+import { formatMbps } from "~/lib/format-speed";
+import {
+  CENTER,
+  RADIUS,
+  TRACK_PATH,
+  angleFor,
+  arcLengthFor,
+  arcPath,
+  fraction,
+} from "~/lib/gauge-geometry";
 
-import { createAnimatedScalar, type AnimatedScalar } from "./anime-scalar";
+import type { LiveTestPresentation, TransferChannel } from "~/model/presentation.model";
+
 
 /**
- * The dashboard-style speed gauge (06-live-test-visualization 6.4).
- *
- * A directional stage has one labelled needle. Duplex has two, both green,
- * separately labelled "You receive" and "You send" — they are never summed or
- * averaged, and no field carrying a combined figure exists anywhere in the
- * data path.
- *
- * The gauge shares the graph's monotonic ceiling, so a needle position means
- * the same thing in both widgets and does not silently change meaning between
- * stages.
- *
- * SVG rather than canvas: it stays crisp, it is readable when WebGL is
- * unavailable, and its numbers are real text.
+ * The speed gauge (6.4). One labelled needle per directional stage, two for
+ * duplex — never summed or averaged, and no field carrying a combined figure
+ * exists anywhere in the data path. Shares the graph's monotonic ceiling, so a
+ * needle position means the same thing in both widgets.
  */
-
-const START_ANGLE = -220; // degrees, measured clockwise from 12 o'clock
-const SWEEP = 260;
-const RADIUS = 54;
-const CENTER = 64;
-
-/** Fraction of full scale, clamped. */
-function fraction(mbps: number, ceiling: number): number {
-  if (ceiling <= 0) return 0;
-  return Math.min(1, Math.max(0, mbps / ceiling));
-}
-
-function angleFor(value: number): number {
-  return START_ANGLE + value * SWEEP;
-}
-
-function polar(angleDeg: number, radius: number): { x: number; y: number } {
-  const radians = ((angleDeg - 90) * Math.PI) / 180;
-  return { x: CENTER + radius * Math.cos(radians), y: CENTER + radius * Math.sin(radians) };
-}
-
-function arcPath(fromValue: number, toValue: number, radius: number): string {
-  const from = polar(angleFor(fromValue), radius);
-  const to = polar(angleFor(toValue), radius);
-  const large = (toValue - fromValue) * SWEEP > 180 ? 1 : 0;
-  return `M ${from.x.toFixed(2)} ${from.y.toFixed(2)} A ${radius} ${radius} 0 ${large} 1 ${to.x.toFixed(2)} ${to.y.toFixed(2)}`;
-}
-
-const TRACK_PATH = arcPath(0, 1, RADIUS);
-
-function formatMbps(mbps: number): string {
-  if (mbps >= 100) return mbps.toFixed(0);
-  if (mbps >= 10) return mbps.toFixed(1);
-  return mbps.toFixed(2);
-}
 
 export interface SpeedGaugeProps {
   presentation: LiveTestPresentation;
@@ -161,40 +128,28 @@ function GaugeChannel({
 }) {
   const arcRef = useRef<SVGPathElement>(null);
   const needleRef = useRef<SVGLineElement>(null);
-  const scalarRef = useRef<AnimatedScalar | null>(null);
 
-  // One animatable for the life of this channel. A stage change unmounts the
-  // channel (its key changes), which disposes it; an update retargets it.
-  useEffect(() => {
-    const arc = arcRef.current;
-    const needle = needleRef.current;
-    if (!arc || !needle) return;
-
-    const length = SWEEP * (Math.PI / 180) * radius;
-    arc.setAttribute("stroke-dasharray", `${length}`);
-
-    const scalar = createAnimatedScalar(
-      (value) => {
-        // Dash offset draws the arc; a rotation moves the needle. Both are
-        // written straight to the element — no React state at 60 Hz.
-        arc.setAttribute("stroke-dashoffset", `${length * (1 - value)}`);
-        needle.setAttribute("transform", `rotate(${angleFor(value)} ${CENTER} ${CENTER})`);
-      },
-      { duration: 260, ease: "outQuad" },
-    );
-    scalarRef.current = scalar;
-    return () => {
-      scalar.dispose();
-      scalarRef.current = null;
-    };
-  }, [radius]);
+  const arcLength = arcLengthFor(radius);
+  // Dash offset draws the arc; a rotation moves the needle. Both are written
+  // straight to the element — no React state at 60 Hz.
+  const { set } = useAnimatedScalar(
+    (value) => {
+      arcRef.current?.setAttribute("stroke-dashoffset", `${arcLength * (1 - value)}`);
+      needleRef.current?.setAttribute(
+        "transform",
+        `rotate(${angleFor(value)} ${CENTER} ${CENTER})`,
+      );
+    },
+    { duration: 260, ease: "outQuad" },
+    [radius],
+  );
 
   const value = channel.mbps === null ? 0 : fraction(channel.mbps, ceiling);
   useEffect(() => {
     // Reduced motion and the frozen finalizing state both write the final
     // value with no interpolation at all.
-    scalarRef.current?.set(value, reducedMotion || frozen);
-  }, [value, reducedMotion, frozen]);
+    set(value, reducedMotion || frozen);
+  }, [set, value, reducedMotion, frozen]);
 
   const color = `var(${channel.token})`;
   return (
@@ -202,6 +157,7 @@ function GaugeChannel({
       <path
         ref={arcRef}
         d={arcPath(0, 1, radius)}
+        strokeDasharray={arcLength}
         fill="none"
         stroke={color}
         strokeWidth={7}

@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useClipboardCopy } from "~/hooks/clipboard-copy.hook";
 import { BsCopy, BsLink45Deg } from "react-icons/bs";
-import { buildResultCopyText, buildResultLink, type P2PSpeedtestResult } from "~/lib/results";
+import { buildResultCopyText, buildResultLink } from "~/lib/results-store";
+import type { P2PSpeedtestResult } from "~/model/result.model";
 
 /**
  * Copy-text and copy-link, identical on the room page's result state and
@@ -9,17 +10,7 @@ import { buildResultCopyText, buildResultLink, type P2PSpeedtestResult } from "~
  * holds the record, wherever a result can be shared from.
  */
 export function ShareActions({ result }: { result: P2PSpeedtestResult }) {
-  const [copied, setCopied] = useState<"text" | "link" | null>(null);
-
-  async function copy(kind: "text" | "link", value: string) {
-    try {
-      await navigator.clipboard.writeText(value);
-      setCopied(kind);
-      setTimeout(() => setCopied(null), 2000);
-    } catch (err) {
-      console.warn(`Failed to copy ${kind}`, err);
-    }
-  }
+  const { copied, copy } = useClipboardCopy<"text" | "link">();
 
   return (
     <div className="flex flex-col items-center gap-2">

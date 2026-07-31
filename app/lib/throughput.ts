@@ -1,51 +1,26 @@
 /**
- * Bulk transfer over the unordered, non-retransmitting `bulk` channels
- * (4.1, S5; multi-connection revision — see 04-throughput-measurement.md's
- * "Revision: throughput tuning and parallel transport"). `webrtc.ts` gives
- * this module `BULK_CONNECTION_COUNT` channels, one per parallel
- * `RTCPeerConnection`, carrying every stage in both directions — the frame
- * header says which stage a chunk belongs to, so a receiver never needs to
- * know which physical channel (or which underlying connection) delivered
- * it, only that all of them share one `runId`/`stageId`/measured-sequence
- * space. This module is transport-topology-agnostic by design: it only
- * knows the `BulkChannel` interface, never how many connections back the
- * channels it's given or whether they share one.
+ * Bulk transfer over the unordered, non-retransmitting `bulk` channels (4.1).
  *
- * `control-channel.ts` (4.2) owns the stage-sequencing FSM and everything
- * on the reliable control channel, including `measurement-progress`; this
- * module only knows about the binary bulk channels themselves — framing,
- * the send loop's per-channel backpressure, and the receiver's counters.
+ * Transport-topology-agnostic by design: it knows only the `BulkChannel`
+ * interface, never how many connections back the channels it is given. Every
+ * channel shares one `runId`/`stageId`/measured-sequence space, so a receiver
+ * never needs to know which one delivered a chunk.
  */
 
 import { bytesToUuid, uuidToBytes } from "./uuid-bytes";
-import { isStageId, type StageId } from "./stage";
+import { isStageId, type StageId } from "~/model/stage.model";
+import {
+  BULK_FRAME_HEADER_BYTES,
+  KIND_CODES,
+  KIND_NAMES,
+  type BulkChannel,
+  type BulkFrame,
+  type BulkFrameKind,
+} from "~/model/bulk-frame.model";
+import type { MeasurementProgress, SealedMeasurement } from "~/model/measurement.model";
 
-// --- Frame header (4.1 design notes) ---------------------------------------
-//
-// runId (16B) | stageId (1B) | seq (4B) | kind (1B: 0=ramp-up, 1=measured,
-// 2=end). Mandatory on every chunk: `seq` is what excludes a straggler from
-// a previous stage arithmetically rather than merely "unlikely" on an
-// unordered, unreliable channel, and `loss` falls out of it for free.
-
-export type BulkFrameKind = "ramp-up" | "measured" | "end";
-
-const KIND_CODES: Record<BulkFrameKind, number> = { "ramp-up": 0, measured: 1, end: 2 };
-const KIND_NAMES: Record<number, BulkFrameKind> = { 0: "ramp-up", 1: "measured", 2: "end" };
-
-export const BULK_FRAME_HEADER_BYTES = 22;
-
-export interface BulkFrame {
-  runId: string;
-  stageId: StageId;
-  seq: number;
-  kind: BulkFrameKind;
-  data: Uint8Array;
-}
-
-/** Builds one wire frame. Throws on a shape the sender should never
- * produce itself (an empty ramp-up/measured payload, or a non-empty end
- * payload) — those are guarded here so a bug can't silently emit a frame
- * `parseBulkFrame` would then reject on the other side. */
+/** Throws on a shape the sender should never produce, so a bug can't
+ * silently emit a frame `parseBulkFrame` would reject on the other side. */
 export function encodeBulkFrame(frame: {
   runId: string;
   stageId: StageId;
@@ -104,37 +79,14 @@ export function parseBulkFrame(data: ArrayBuffer): BulkFrame | null {
 
 // --- Sender ------------------------------------------------------------
 
-/** The subset of `RTCDataChannel` the send loop needs — real channels
- * satisfy this directly; tests supply a fake implementing the same shape. */
-export interface BulkChannel {
-  readonly bufferedAmount: number;
-  bufferedAmountLowThreshold: number;
-  send(data: ArrayBuffer): void;
-  addEventListener(type: "bufferedamountlow", listener: () => void): void;
-  removeEventListener(type: "bufferedamountlow", listener: () => void): void;
-}
-
-/** A short warm-up period of discarded `ramp-up` chunks before measurement
- * begins, so early buffering/congestion-window effects don't distort the
- * measured window. Ramp-up chunks never consume the measured sequence
- * space (4.1 design notes). Exported so `BulkReceiver`'s hard deadline can
- * budget for it without duplicating the constant. */
+/** Warm-up before measurement, so congestion-window effects don't distort
+ * the window. Ramp-up chunks never consume the measured sequence space. */
 export const RAMP_UP_MS = 1500;
 
-// Each `bufferedamountlow` round trip carries real fixed overhead (event
-// dispatch, SCTP bookkeeping) independent of link speed. A small threshold
-// means paying that overhead every few hundred KB, which throttles a fast
-// (e.g. direct LAN) link far below what the wire can actually do — the
-// bottleneck becomes the JS/event-loop round trip, not the network. Client-
-// side only — the numbers that actually shape a test (duration, byte cap,
-// chunk size) come from server-issued `test-config`, never this.
-//
-// This is an *aggregate* target across every channel, not per channel:
-// with `BULK_CONNECTION_COUNT` potentially large, a fixed per-channel floor
-// would multiply total queued memory by channel count for no benefit —
-// keeping the pipe full doesn't need more total bytes queued just because
-// it's spread over more channels, it needs each channel's own share of
-// that same total.
+// An *aggregate* target across every channel, not per channel: a per-channel
+// floor would multiply queued memory by channel count for no benefit. Too
+// small a threshold makes the JS/event-loop round trip the bottleneck rather
+// than the network. Shapes nothing measured — that comes from `test-config`.
 const AGGREGATE_BUFFERED_LOW_THRESHOLD_BYTES = 8 * 1024 * 1024; // 8 MiB total
 const BUFFERED_LOW_THRESHOLD_MIN_CHUNKS_PER_CHANNEL = 8;
 
@@ -157,25 +109,15 @@ export interface BulkSenderOptions {
 
 type SenderPhase = "ramp-up" | "measured" | "done";
 
-/** Event-driven send loop against `bufferedAmount`/`bufferedamountlow`
- * (4.1), fanned out across every channel in `channels`: each one gets its
- * own backpressure loop, but they all draw the next seq/byte from one
- * shared counter, so a channel that drains faster naturally pulls more of
- * the stream — no explicit round-robin bookkeeping needed. Sends until a
- * channel's buffer crosses its low-water threshold, then waits for the
- * browser to tell that channel there's room again, rather than ever
- * queuing unbounded data client-side. */
+/** Event-driven send loop against `bufferedAmount`/`bufferedamountlow`.
+ * Every channel draws from one shared seq/byte counter, so a channel that
+ * drains faster naturally pulls more of the stream. */
 export class BulkSender {
   private readonly opts: Required<Omit<BulkSenderOptions, "onComplete">> &
     Pick<BulkSenderOptions, "onComplete">;
-  // One preallocated measured/ramp-up frame, mutated (seq + kind byte only)
-  // and resent on every call rather than allocated fresh each time — safe
-  // to share across every channel because `RTCDataChannel.send(ArrayBuffer)`
-  // copies its contents synchronously before returning (structured-clone
-  // semantics, no transfer list) and JS is single-threaded, so no two
-  // sends can ever be "in flight" over this buffer at once. Turns "one
-  // allocation + one memcpy per chunk" into zero, which matters once
-  // you're sending thousands of chunks/sec across several channels.
+  // One frame buffer, mutated (seq + kind byte) and resent. Safe to share
+  // across channels: `send(ArrayBuffer)` copies synchronously before
+  // returning and JS is single-threaded, so no two sends overlap on it.
   private readonly frameBuffer: ArrayBuffer;
   private readonly frameBytes: Uint8Array;
   private readonly frameView: DataView;
@@ -240,18 +182,9 @@ export class BulkSender {
     );
   }
 
-  /** Round-robins one chunk at a time across every channel with room,
-   * repeating passes until none has any left — never fully draining one
-   * channel's headroom before giving the next channel anything. Filling
-   * channel 0 to its threshold before touching channel 1 (an earlier
-   * version of this loop did exactly that) front-loads one stream over the
-   * others every single pass: since every data channel on one
-   * `RTCPeerConnection` shares one SCTP association, handing one stream a
-   * large lead in queued data is what actually produces the "channels
-   * fill in sequence, not in parallel" behavior visible in
-   * `chrome://webrtc-internals` — not just a cosmetic ordering choice.
-   * Re-entered whenever any one channel's `bufferedamountlow` fires; a
-   * channel still above its threshold when visited is a cheap skip. */
+  /** One chunk at a time across every channel with room, not one channel to
+   * its threshold before the next: channels on one `RTCPeerConnection` share
+   * an SCTP association, so a large queued lead really does serialize them. */
   private pump(): void {
     if (this.stopped || this.phase === "done") return;
     let sentAny = true;
@@ -334,29 +267,13 @@ export class BulkSender {
 // drift out of sync whenever the constants here are retuned.
 export const QUIET_PERIOD_MS = 1000;
 export const PROGRESS_INTERVAL_MS = 50;
-// How often handleFrame is allowed to actually reschedule the quiet timer
-// (see resetQuietTimer) — well under QUIET_PERIOD_MS so the close-on-quiet
-// detection stays effectively as tight, just without a timer churn on
-// every single chunk.
+// Well under QUIET_PERIOD_MS, so detection stays as tight without a timer
+// reschedule on every single chunk.
 const QUIET_TIMER_RESET_THROTTLE_MS = 100;
 // Margin over the sender's own ramp-up + measured budget: covers
 // negotiation/scheduling jitter so the receiver's own hard deadline is
 // never the thing that cuts off a well-behaved sender.
 export const HARD_DEADLINE_MARGIN_MS = 15_000;
-
-export interface ReceiverSnapshot {
-  elapsedMs: number;
-  bytes: number;
-  chunksSeen: number;
-  highestSeqPlusOne: number;
-}
-
-export interface SealedMeasurement {
-  bytes: number;
-  durationMs: number;
-  chunksSeen: number;
-  chunksExpected: number;
-}
 
 export type ReceiverCloseReason = "end-marker" | "quiet-period" | "hard-deadline";
 
@@ -365,18 +282,16 @@ export interface BulkReceiverOptions {
   stageId: StageId;
   maxDurationMs: number;
   rampUpMs?: number;
-  onProgress?: (snapshot: ReceiverSnapshot) => void;
+  onProgress?: (snapshot: MeasurementProgress) => void;
   /** The receive window closed (marker, quiet period, or hard deadline).
    * Not yet a sealed result — that needs the sender's reliable
    * `sentMeasuredChunks`, supplied later via `finalize`. */
   onWindowClosed?: (reason: ReceiverCloseReason) => void;
 }
 
-/** Counts inbound `measured` chunks matching this stage's `runId`/`stageId`
- * and tracks the receive window's real extent, ending it on whichever of
- * the end marker, a quiet period, or a hard deadline comes first — but
- * measuring `durationMs` to the last counted chunk's arrival, not to
- * whichever of those fired (4.1 design notes). */
+/** Ends the window on whichever of the end marker, a quiet period, or a hard
+ * deadline comes first — but measures `durationMs` to the last counted
+ * chunk's arrival, not to whichever of those fired. */
 export class BulkReceiver {
   private readonly opts: Required<Omit<BulkReceiverOptions, "onProgress" | "onWindowClosed">> &
     Pick<BulkReceiverOptions, "onProgress" | "onWindowClosed">;
@@ -431,7 +346,7 @@ export class BulkReceiver {
   }
 
   /** Best-effort live snapshot; the sealed result is `finalize`'s alone. */
-  snapshot(): ReceiverSnapshot {
+  snapshot(): MeasurementProgress {
     return {
       elapsedMs: this.currentDurationMs(),
       bytes: this.totalBytes(),
@@ -440,14 +355,10 @@ export class BulkReceiver {
     };
   }
 
-  /** Discards out-of-range sequence numbers and produces the raw counts a
-   * sealed `stage-result` carries — never `highestSeen + 1`. Returns `null`
-   * per 4.1's rule ("`chunksExpected` must be greater than zero") when the
-   * sender's reliable total is unusable; the stage then produces no edge.
-   * Callers are expected to wait for `onWindowClosed` first (the window
-   * routinely closes before the reliable total arrives); this freezes the
-   * window itself only as a defensive fallback and never re-emits
-   * `onWindowClosed` for it. */
+  /** `chunksExpected` is the sender's reliable total, never `highestSeen + 1`;
+   * `null` when that total is unusable, and the stage then produces no edge.
+   * Freezing here is a defensive fallback — callers wait for
+   * `onWindowClosed` — and never re-emits it. */
   finalize(sentMeasuredChunks: number): SealedMeasurement | null {
     this.freezeWindow();
     if (!Number.isInteger(sentMeasuredChunks) || sentMeasuredChunks <= 0) return null;
@@ -480,13 +391,9 @@ export class BulkReceiver {
     return end - this.firstChunkAt;
   }
 
-  /** Throttled: rescheduling a timer on every single received chunk is
-   * real, avoidable overhead at high packet rates (thousands/sec), and a
-   * quiet-period detector doesn't need millisecond precision on exactly
-   * when it was last touched — only that it fires within ~`QUIET_PERIOD_MS`
-   * of true last activity. `lastActivityAt` itself is still updated on
-   * every frame regardless (in `handleFrame`), so `durationMs` stays exact
-   * even though the timer reschedule is throttled. */
+  /** Throttled to avoid a timer reschedule per chunk at thousands/sec.
+   * `lastActivityAt` is still updated on every frame, so `durationMs` stays
+   * exact even though the reschedule is not. */
   private resetQuietTimer(now: number): void {
     if (now - this.lastQuietTimerResetAt < QUIET_TIMER_RESET_THROTTLE_MS) return;
     this.lastQuietTimerResetAt = now;
@@ -507,10 +414,8 @@ export class BulkReceiver {
     this.opts.onWindowClosed?.(reason);
   }
 
-  /** The window-ending math shared by every close path (4.1 design notes):
-   * measure `durationMs` to the last counted chunk's arrival, not to
-   * whichever trigger fired, and emit exactly one final progress update.
-   * Idempotent — a later close path (or `finalize`) never re-freezes it. */
+  /** Shared by every close path: `durationMs` runs to the last counted
+   * chunk's arrival, not to whichever trigger fired. Idempotent. */
   private freezeWindow(): void {
     if (this.closed) return;
     this.closed = true;

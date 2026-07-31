@@ -4,28 +4,21 @@ import {
   LiveVisualizationBoundary,
   VisualizationPending,
 } from "~/components/speedtest/LiveVisualizationBoundary";
-import type { StageProgressSnapshot } from "~/lib/control-channel";
-import { DOWNLOAD, DUPLEX, UPLOAD, edgeKey, type Slot, type StageId } from "~/lib/stage";
-import {
-  describePresentation,
-  selectLiveTestPresentation,
-  type LiveTestRoomView,
-  type RoomPhase,
-} from "~/lib/test-visualization";
+import type { StageProgress } from "~/model/measurement.model";
+import type { Slot } from "~/model/signaling.model";
+import { DOWNLOAD, DUPLEX, UPLOAD, edgeKey, type StageId } from "~/model/stage.model";
+import { describePresentation, selectLiveTestPresentation } from "~/lib/presentation-selector";
+import type { RoomPhase } from "~/model/room.model";
+import type { LiveTestRoomView } from "~/model/presentation.model";
 
 /**
- * Development-only fixture harness for the live visualization
- * (06-live-test-visualization 6.6).
+ * Development-only fixture harness for the live visualization (6.6).
  *
- * Drives the real dashboard through both slots, all three stages, fixed
- * progress values, late and missing locations, and the terminal transitions —
- * without opening a room, pairing two browsers, or moving a byte of test
- * traffic. That makes the awkward cases (date line, antipodal, shared
- * location, one peer hidden) repeatable instead of dependent on where two
- * volunteers happen to be sitting.
+ * Drives the real dashboard through both slots, all three stages and the
+ * awkward geographic cases (date line, antipodal, shared location, one peer
+ * hidden) without opening a room or moving a byte of test traffic.
  *
- * `app/routes.ts` only registers this path outside production builds, so it
- * is never a public surface.
+ * `app/routes.ts` only registers this path outside production builds.
  */
 
 const LiveTestDashboard = lazy(() => import("~/components/speedtest/LiveTestDashboard"));
@@ -53,7 +46,7 @@ const PHASES: RoomPhase[] = ["paired", "testing", "finalizing", "result"];
 
 function progressFor(stageId: StageId | null, mbpsIn: number, mbpsOut: number) {
   if (stageId === null) return {};
-  const snap = (receiverSlot: Slot, mbps: number): StageProgressSnapshot => ({
+  const snap = (receiverSlot: Slot, mbps: number): StageProgress => ({
     stageId,
     receiverSlot,
     elapsedMs: 4000,
@@ -86,13 +79,15 @@ export default function DevLiveView() {
       runId,
       phase,
       stageId,
-      progressRunId: staleRun ? "some-older-run" : runId,
-      progress: hasProgress ? progressFor(stageId, mbpsIn, mbpsOut) : {},
+      stageProgress: {
+        runId: staleRun ? "some-older-run" : runId,
+        entries: hasProgress ? progressFor(stageId, mbpsIn, mbpsOut) : {},
+      },
       liveLatency: { rttMs: 27.4, jitterMs: 1.8, sampleCount: 24 },
       latencyBaseline: undefined,
       connectionType: "DIRECT",
-      localProfile: { name: "Local peer", geo: PLACES[localPlace] ?? undefined },
-      remoteProfile: { name: "Remote peer", geo: PLACES[remotePlace] ?? undefined },
+      selfProfile: { name: "Local peer", geo: PLACES[localPlace] ?? undefined },
+      otherProfile: { name: "Remote peer", geo: PLACES[remotePlace] ?? undefined },
     };
     return selectLiveTestPresentation(view, localSlot);
   }, [runId, phase, stageId, staleRun, hasProgress, mbpsIn, mbpsOut, localPlace, remotePlace, localSlot]);

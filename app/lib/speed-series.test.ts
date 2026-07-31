@@ -1,16 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { DOWNLOAD, DUPLEX, UPLOAD, edgeKey, type Slot, type StageId } from "~/lib/stage";
-import {
-  MAX_POINTS_PER_SERIES,
-  emptySpeedSeries,
-  latest,
-  niceCeiling,
-  recordSample,
-  totalPoints,
-  type SpeedSeriesState,
-} from "~/lib/speed-series";
-import type { TransferChannel } from "~/lib/test-visualization";
+import type { Slot } from "~/model/signaling.model";
+import { DOWNLOAD, DUPLEX, UPLOAD, edgeKey, type StageId } from "~/model/stage.model";
+import { emptySpeedSeries, latest, niceCeiling, recordSample, totalPoints } from "~/lib/speed-series";
+import { MAX_POINTS_PER_SERIES, type SpeedSeriesState } from "~/model/speed-series.model";
+import type { TransferChannel } from "~/model/presentation.model";
 
 const RUN = "run-1";
 

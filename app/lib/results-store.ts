@@ -1,65 +1,35 @@
 /**
- * Local result history (4.3b). One `P2PSpeedtestResult` envelope per
- * `metadata.peer-id` + `data.room` (S7), stored in IndexedDB rather than a
- * single shared `localStorage` array so each identity gets a real
- * transaction and independent key, and two same-origin tabs never race a
- * shared read/modify/write.
+ * Local result history (4.3b). One envelope per `metadata.peer-id` +
+ * `data.room` (S7), in IndexedDB rather than a shared `localStorage` array so
+ * each identity gets a real transaction and two tabs never race a shared
+ * read/modify/write.
  */
 
-import type { GeoInfo } from "./geo";
-import { fallbackPeerName } from "./peer-profile";
+import { fallbackPeerName, type PeerWithProfile } from "~/model/peer.model";
 import { validateEnvelope } from "./result-validate";
-import { DUPLEX, senderSlotFor, type Slot, type StageBankEntry } from "./stage";
+import type { ConnectionType } from "~/model/connection.model";
+import type { Slot } from "~/model/signaling.model";
+import type { StageBankEntry } from "~/model/measurement.model";
+import { DUPLEX, senderSlotFor } from "~/model/stage.model";
+import {
+  SUPPORTED_API_VERSION,
+  type BandwidthEdge,
+  type P2PSpeedtestResult,
+  type ResultData,
+  type ResultPeer,
+  type ResultStatus,
+} from "~/model/result.model";
+import type {
+  BuildExportOutcome,
+  ExportBundle,
+  GetResultOutcome,
+  ImportEntryResult,
+  ImportResultsOutcome,
+  ListResultsOutcome,
+  SaveResultOutcome,
+} from "~/model/storage.model";
 
-export type ResultStatus = "SUCCEED" | "FAILED" | "CANCELED";
-export type ViaType = "DIRECT" | "RELAY" | "UNKNOWN";
-
-export interface ResultPeer {
-  id: string;
-  name: string;
-  ua?: string;
-  ip?: string;
-  protocol?: "IPv4" | "IPv6";
-  geo?: GeoInfo;
-}
-
-export interface BandwidthEdge {
-  from: string;
-  to: string;
-  speed: number;
-  latency: number;
-  jitter: number;
-  loss: number;
-}
-
-export interface ResultData {
-  room: string;
-  status: ResultStatus;
-  timestamp: string;
-  peers: [ResultPeer, ResultPeer];
-  bandwidth: { directional?: BandwidthEdge[]; duplex?: BandwidthEdge[] };
-  via: ViaType;
-}
-
-export interface ResultMetadata {
-  id: string;
-  "peer-id": string;
-  hash: string;
-}
-
-export interface P2PSpeedtestResult {
-  apiVersion: "sws.aries0d0f.me/v1";
-  kind: "P2PSpeedtestResult";
-  metadata: ResultMetadata;
-  data: ResultData;
-}
-
-export function buildMetadata(roomId: string, peerId: string, hash: string): ResultMetadata {
-  return { id: roomId, "peer-id": peerId, hash };
-}
-
-/** bits per second → Mbps, one decimal place. The only transformation
- * Phase 5's UI is permitted to apply to a stored bandwidth edge (5.2) —
+/** The only transformation the UI may apply to a stored bandwidth edge —
  * everything else renders the schema's own fields as-is. */
 export function bpsToMbps(bitsPerSecond: number): string {
   return (bitsPerSecond / 1_000_000).toFixed(1);
@@ -69,13 +39,9 @@ function edgeLine(edge: BandwidthEdge): string {
   return `${bpsToMbps(edge.speed)} Mbps · ${edge.latency.toFixed(0)} ms · loss ${(edge.loss * 100).toFixed(2)}%`;
 }
 
-/**
- * Shared copy-text builder for the room page's result state and the
- * results detail page (5.5). Always names `data.via` and both bandwidth
- * groups: an absent group reads as "not measured" rather than being
- * omitted or printed as a zero, so a partial `FAILED`/`CANCELED` record
- * never reads as a complete result with suspiciously few numbers.
- */
+/** Always names both bandwidth groups: an absent group reads as "not
+ * measured" rather than being omitted or printed as a zero, so a partial
+ * record never reads as a complete one with suspiciously few numbers. */
 export function buildResultCopyText(data: ResultData): string {
   const lines: string[] = [`P2P Speedtest result — ${data.status}`, `Connection: ${data.via}`];
 
@@ -94,38 +60,20 @@ export function buildResultCopyText(data: ResultData): string {
   return lines.join("\n");
 }
 
-/**
- * A `/results/:room/:peerId` link (5.5). Resolves only in a browser that
- * already holds this exact record — export/import (5.3/5.4) is the actual
- * cross-device portability path, so callers must show the local-only
- * caveat alongside this rather than implying the link travels.
- */
+/** Resolves only in a browser that already holds this exact record —
+ * export/import is the actual portability path, so callers must show the
+ * local-only caveat rather than implying the link travels. */
 export function buildResultLink(origin: string, room: string, peerId: string): string {
   return `${origin}/results/${room}/${peerId}`;
 }
 
 // --- Assembly (4.4) ---------------------------------------------------
 
-export interface AssemblePeerInfo {
-  slot: Slot;
-  peerId: string;
-  /** `null` when this peer's profile never arrived — `buildResultPeer`
-   * falls back to a slot-based name (S6) rather than producing an
-   * unstorable record. */
-  profile: {
-    name: string;
-    ua?: string;
-    ip?: string;
-    protocol?: "IPv4" | "IPv6";
-    geo?: GeoInfo;
-  } | null;
-}
-
-function buildResultPeer(peer: AssemblePeerInfo): ResultPeer {
-  if (!peer.profile) return { id: peer.peerId, name: fallbackPeerName(peer.slot) };
+function buildResultPeer(peer: PeerWithProfile): ResultPeer {
+  if (!peer.profile) return { id: peer.id, name: fallbackPeerName(peer.slot) };
   const { name, ua, ip, protocol, geo } = peer.profile;
   return {
-    id: peer.peerId,
+    id: peer.id,
     name,
     ...(ua ? { ua } : {}),
     ...(ip ? { ip } : {}),
@@ -150,10 +98,10 @@ export interface AssembleInput {
   room: string;
   timestamp: string;
   status: ResultStatus;
-  via: ViaType;
+  via: ConnectionType;
   /** Both peers, in any order — sorted by slot here so assembly is
    * deterministic regardless of which peer is "me" (4.4, S6). */
-  peers: [AssemblePeerInfo, AssemblePeerInfo];
+  peers: [PeerWithProfile, PeerWithProfile];
   /** The merged edge set: the shared, acknowledged stage bank plus any
    * locally sealed but unacknowledged current-stage edge and anything
    * merged in from the peer's terminal `result-share`. */
@@ -161,16 +109,14 @@ export interface AssembleInput {
 }
 
 /**
- * Deterministic record assembly (4.4's "Assembling the record"): peers and
- * edges ordered by slot, `speed`/`loss` computed from raw counts, and
+ * Peers and edges ordered by slot, `speed`/`loss` computed from raw counts,
  * `from`/`to` derived from the fixed stage roles rather than trusted from
- * either peer. Two peers assembling from the same frozen bank and shares
- * produce byte-identical `data` — this is what a checksum comparison
- * actually verifies.
+ * either peer. Two peers assembling from the same frozen bank produce
+ * byte-identical `data` — which is what a checksum comparison verifies.
  */
 export function assembleResult(input: AssembleInput): ResultData {
   const sortedPeers = [...input.peers].sort((a, b) => a.slot - b.slot);
-  const idBySlot = (slot: Slot): string => sortedPeers.find((p) => p.slot === slot)!.peerId;
+  const idBySlot = (slot: Slot): string => sortedPeers.find((p) => p.slot === slot)!.id;
   const peers: [ResultPeer, ResultPeer] = [
     buildResultPeer(sortedPeers[0]),
     buildResultPeer(sortedPeers[1]),
@@ -226,18 +172,11 @@ function openDb(): Promise<IDBDatabase> {
   });
 }
 
-export type SaveResultOutcome =
-  | { status: "saved" }
-  | { status: "deduplicated" }
-  | { status: "error"; reason: "open-failed" | "transaction-failed" | "quota-exceeded" };
-
 /**
- * Owns deduplication itself — no caller checks first. One `readwrite`
- * transaction calls `add`; an `add` `ConstraintError` means that identity
- * already exists, and its handler prevents that expected request error from
- * aborting the transaction rather than treating it as a real failure.
- * Nothing here ever calls `put`: the first write for an identity always
- * wins, exactly once (4.3b, S7).
+ * Owns deduplication itself — no caller checks first. A `ConstraintError` from
+ * `add` means that identity already exists; its handler prevents that expected
+ * error from aborting the transaction. Nothing here ever calls `put`: the
+ * first write for an identity always wins, exactly once (S7).
  */
 export async function saveResult(result: P2PSpeedtestResult): Promise<SaveResultOutcome> {
   let db: IDBDatabase;
@@ -278,11 +217,9 @@ export async function saveResult(result: P2PSpeedtestResult): Promise<SaveResult
       // Any other error is left to abort the transaction normally.
     };
 
-    // Each call opens and closes its own connection rather than holding one
-    // open across calls: nothing here depends on a long-lived connection,
-    // and closing promptly is what lets versionchange/deleteDatabase (used
-    // by tests, and by any future migration) proceed without blocking on a
-    // idle handle from an unrelated call.
+    // Each call opens and closes its own connection: closing promptly is what
+    // lets versionchange/deleteDatabase proceed without blocking on an idle
+    // handle from an unrelated call.
     tx.oncomplete = () => {
       db.close();
       resolve(outcome);
@@ -328,10 +265,6 @@ async function getAllRaw(): Promise<RawRowsOutcome> {
   });
 }
 
-export type ListResultsOutcome =
-  | { status: "ok"; results: P2PSpeedtestResult[]; warnings: string[] }
-  | { status: "error"; reason: "open-failed" | "transaction-failed" };
-
 /** Validates every stored entry on read. A malformed legacy/imported row is
  * skipped with a visible warning and left in the store untouched — never
  * deleted — for manual recovery; one bad row never wipes the rest. */
@@ -353,12 +286,6 @@ export async function listResults(): Promise<ListResultsOutcome> {
   }
   return { status: "ok", results, warnings };
 }
-
-export type GetResultOutcome =
-  | { status: "ok"; result: P2PSpeedtestResult }
-  | { status: "not-found" }
-  | { status: "invalid"; errors: string[] }
-  | { status: "error"; reason: "open-failed" | "transaction-failed" };
 
 async function getRaw(
   room: string,
@@ -407,18 +334,8 @@ export async function getResult(room: string, peerId: string): Promise<GetResult
 
 // --- Export (5.3) -------------------------------------------------------
 
-export interface ExportBundle {
-  results: P2PSpeedtestResult[];
-}
-
-export type BuildExportOutcome =
-  | { status: "ok"; bundle: ExportBundle }
-  | { status: "error"; reason: "open-failed" | "transaction-failed" };
-
-/** Builds the `{ results: [...] }` export shape — no separate top-level
- * version wrapper, since every entry already carries its own `apiVersion`
- * (5.3). Pure data assembly, kept apart from `downloadExportBundle` so it
- * can be exercised without a DOM. */
+/** Pure data assembly, kept apart from `downloadExportBundle` so it can be
+ * exercised without a DOM. */
 export async function buildExportBundle(keys?: Array<[string, string]>): Promise<BuildExportOutcome> {
   const listed = await listResults();
   if (listed.status === "error") return listed;
@@ -454,25 +371,6 @@ export async function exportResults(keys?: Array<[string, string]>): Promise<Bui
 
 // --- Import (5.4) --------------------------------------------------------
 
-const SUPPORTED_API_VERSION = "sws.aries0d0f.me/v1";
-
-export type ImportEntryOutcome =
-  | { status: "saved" }
-  | { status: "deduplicated" }
-  | { status: "malformed"; message: string }
-  | { status: "unsupported-version"; message: string }
-  | { status: "invalid"; errors: string[] }
-  | { status: "save-error"; reason: string };
-
-export interface ImportEntryResult {
-  index: number;
-  outcome: ImportEntryOutcome;
-}
-
-export type ImportResultsOutcome =
-  | { status: "malformed-file" }
-  | { status: "ok"; entries: ImportEntryResult[] };
-
 function hasStringApiVersionAndKind(value: unknown): value is { apiVersion: string; kind: string } {
   if (typeof value !== "object" || value === null) return false;
   const v = value as Record<string, unknown>;
@@ -480,15 +378,10 @@ function hasStringApiVersionAndKind(value: unknown): value is { apiVersion: stri
 }
 
 /**
- * Imports an exported `{ results: [...] }` file (5.4). The outer shape is
- * the only fatal case — a malformed or missing `results` array aborts
- * before touching storage. Every entry inside it is then handled
- * independently, in order: a missing/malformed `apiVersion`/`kind` is
- * skipped as malformed, an unsupported `apiVersion` is skipped by name
- * (never coerced into this version's shape), and everything else goes
- * through `validateEnvelope` — schema, semantics, identity, then checksum —
- * before `saveResult` applies Phase 4's transactional first-write-wins
- * merge. One bad entry never aborts the rest of the file.
+ * The outer shape is the only fatal case. Every entry is then handled
+ * independently and in order: an unsupported `apiVersion` is skipped by name,
+ * never coerced into this version's shape, and one bad entry never aborts the
+ * rest of the file.
  */
 export async function importResults(file: File): Promise<ImportResultsOutcome> {
   let parsed: unknown;

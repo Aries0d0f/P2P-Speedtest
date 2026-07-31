@@ -1,11 +1,7 @@
-import { useState, useEffect, type SubmitEvent } from "react";
+import { useState, type SubmitEvent } from "react";
 import { Link, useNavigate } from "react-router";
 import { ProfileFields } from "~/components/ProfileFields";
-import {
-  defaultProfile,
-  saveProfile,
-  type ConfirmedProfile,
-} from "~/lib/peer-profile";
+import { useProfileDraft } from "~/hooks/confirmed-profile.hook";
 import { resolveJoinInput, tokenToSlug } from "~/lib/room-token";
 
 import type { Route } from "./+types/home";
@@ -24,26 +20,11 @@ const USER_AGENT = typeof navigator !== "undefined" ? navigator.userAgent : "";
 
 export default function Home() {
   const navigate = useNavigate();
-  const [profile, setProfile] = useState<ConfirmedProfile>();
-  useEffect(() => {
-    defaultProfile(USER_AGENT).then(setProfile);
-  }, []);
+  const { draft: profile, setDraft: setProfile, persist: confirmProfile } = useProfileDraft(USER_AGENT);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [joinInput, setJoinInput] = useState("");
   const [joinError, setJoinError] = useState<string | null>(null);
-
-  // Both entry paths confirm the same profile before entering a room (S8);
-  // "confirm" is just persisting it right before the action that opens one.
-  function confirmProfile(): ConfirmedProfile {
-    const confirmed = {
-      privacyLevel: "off" as const,
-      ...profile,
-      name: profile?.name.trim() ?? "",
-    };
-    saveProfile(confirmed);
-    return confirmed;
-  }
 
   async function handleCreate() {
     if (!profile?.name.trim()) {

@@ -1,21 +1,20 @@
 import { act, render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { StageProgressSnapshot } from "~/lib/control-channel";
-import { DOWNLOAD, DUPLEX, UPLOAD, edgeKey, type Slot, type StageId } from "~/lib/stage";
-import {
-  selectLiveTestPresentation,
-  selectStoredResultPresentation,
-  type LiveTestPresentation,
-  type LiveTestRoomView,
-} from "~/lib/test-visualization";
+import type { StageProgress } from "~/model/measurement.model";
+import type { Slot } from "~/model/signaling.model";
+import { DOWNLOAD, DUPLEX, UPLOAD, edgeKey, type StageId } from "~/model/stage.model";
+import { selectLiveTestPresentation, selectStoredResultPresentation } from "~/lib/presentation-selector";
+import type { LiveTestPresentation, LiveTestRoomView } from "~/model/presentation.model";
 
 import LiveTestDashboard from "./LiveTestDashboard";
-import type { GlobeDiagnostics, GlobeScene, GlobeSceneFactory } from "./three/globe-scene";
+import type { GlobeDiagnostics, GlobeScene, GlobeSceneFactory } from "~/model/globe.model";
 
 const RUN = "run-1";
-const TOKYO = { lat: 35.6762, lon: 139.6503 };
-const BERLIN = { lat: 52.52, lon: 13.405 };
+// Shaped like a real lookup, which returns place fields alongside the
+// coordinates — the marker keys off lat/lon, the text equivalent off the names.
+const TOKYO = { lat: 35.6762, lon: 139.6503, city: "Tokyo", country: "Japan" };
+const BERLIN = { lat: 52.52, lon: 13.405, city: "Berlin", country: "Germany" };
 
 /** The globe is exercised in `PeerGlobe.test.tsx`; here it is a stub so the
  * dashboard's own composition and semantics are what is under test. */
@@ -28,7 +27,7 @@ const stubScene: GlobeSceneFactory = async () =>
     dispose: () => {},
   }) satisfies GlobeScene;
 
-function snapshot(stageId: StageId, receiverSlot: Slot, bytes: number): StageProgressSnapshot {
+function snapshot(stageId: StageId, receiverSlot: Slot, bytes: number): StageProgress {
   return { stageId, receiverSlot, bytes, elapsedMs: 1000, chunksSeen: 100, highestSeqPlusOne: 100 };
 }
 
@@ -37,13 +36,12 @@ function presentationFor(over: Partial<LiveTestRoomView> = {}, localSlot: Slot =
     runId: RUN,
     phase: "testing",
     stageId: null,
-    progressRunId: RUN,
-    progress: {},
+    stageProgress: { runId: RUN, entries: {} },
     liveLatency: null,
     latencyBaseline: undefined,
     connectionType: "DIRECT",
-    localProfile: { name: "Ada", geo: TOKYO },
-    remoteProfile: { name: "Grace", geo: BERLIN },
+    selfProfile: { name: "Ada", geo: TOKYO },
+    otherProfile: { name: "Grace", geo: BERLIN },
     ...over,
   };
   return selectLiveTestPresentation(view, localSlot);
@@ -69,23 +67,23 @@ describe("LiveTestDashboard — semantics without the canvas", () => {
     // Scoped to the semantic region: the globe's own overlay labels are
     // `aria-hidden` decoration and must not be what a reader relies on.
     const region = screen.getByRole("region", { name: "Peers and locations" });
-    expect(region.textContent).toContain("Ada (you)");
-    expect(region.textContent).toContain("35.68, 139.65");
+    expect(region.textContent).toContain("Ada (You)");
+    expect(region.textContent).toContain("Tokyo, Japan");
     expect(region.textContent).toContain("Grace");
-    expect(region.textContent).toContain("52.52, 13.40");
+    expect(region.textContent).toContain("Berlin, Germany");
   });
 
   it("says exactly whose location is unavailable", async () => {
-    await renderDashboard(presentationFor({ remoteProfile: { name: "Grace" } }));
+    await renderDashboard(presentationFor({ otherProfile: { name: "Grace" } }));
     const region = screen.getByRole("region", { name: "Peers and locations" });
     const graceLine = within(region).getByText("Grace").closest("p")!;
     expect(graceLine.textContent).toContain("location not shared");
     // The peer who did share is unaffected.
-    expect(region.textContent).toContain("35.68, 139.65");
+    expect(region.textContent).toContain("Tokyo, Japan");
   });
 
   it("distinguishes 'not shared' from 'not received yet'", async () => {
-    await renderDashboard(presentationFor({ remoteProfile: null }));
+    await renderDashboard(presentationFor({ otherProfile: null }));
     expect(screen.getByText(/location not received yet/)).toBeInTheDocument();
   });
 
@@ -93,7 +91,7 @@ describe("LiveTestDashboard — semantics without the canvas", () => {
     await renderDashboard(
       presentationFor({
         stageId: DOWNLOAD,
-        progress: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1, 1_250_000) },
+        stageProgress: { runId: RUN, entries: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1, 1_250_000) } },
       }),
     );
     // Slot 0 sends during download: Ada → Grace, on both peers' screens.
@@ -105,10 +103,10 @@ describe("LiveTestDashboard — semantics without the canvas", () => {
     await renderDashboard(
       presentationFor({
         stageId: DUPLEX,
-        progress: {
+        stageProgress: { runId: RUN, entries: {
           [edgeKey(DUPLEX, 0)]: snapshot(DUPLEX, 0, 1_250_000),
           [edgeKey(DUPLEX, 1)]: snapshot(DUPLEX, 1, 2_500_000),
-        },
+        } },
       }),
     );
     expect(screen.getByText(/Grace → Ada/)).toBeInTheDocument();
@@ -140,7 +138,7 @@ describe("LiveTestDashboard — announcements", () => {
     await renderDashboard(
       presentationFor({
         stageId: DOWNLOAD,
-        progress: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1, 1_250_000) },
+        stageProgress: { runId: RUN, entries: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1, 1_250_000) } },
       }),
     );
     const live = document.querySelectorAll("[aria-live]");
@@ -167,7 +165,7 @@ describe("LiveTestDashboard — panels follow the presentation", () => {
     await renderDashboard(
       presentationFor({
         stageId: DOWNLOAD,
-        progress: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1, 1_250_000) },
+        stageProgress: { runId: RUN, entries: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1, 1_250_000) } },
       }),
     );
     expect(document.querySelector("canvas")).not.toBeNull();
@@ -180,7 +178,7 @@ describe("LiveTestDashboard — panels follow the presentation", () => {
       presentationFor({
         phase: "finalizing",
         stageId: DOWNLOAD,
-        progress: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1, 1_250_000) },
+        stageProgress: { runId: RUN, entries: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1, 1_250_000) } },
       }),
     );
     // Still there, still showing the number — it does not blank mid-sentence.
@@ -191,7 +189,7 @@ describe("LiveTestDashboard — panels follow the presentation", () => {
     const { rerender } = await renderDashboard(
       presentationFor({
         stageId: DOWNLOAD,
-        progress: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1, 1_250_000) },
+        stageProgress: { runId: RUN, entries: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1, 1_250_000) } },
       }),
     );
     rerender(
@@ -221,7 +219,7 @@ describe("LiveTestDashboard — panels follow the presentation", () => {
 
     expect(document.querySelector("canvas")).not.toBeNull();
     const region = screen.getByRole("region", { name: "Peers and locations" });
-    expect(region.textContent).toContain("Ada (you)");
+    expect(region.textContent).toContain("Ada (You)");
     expect(region.textContent).toContain("Grace");
     expect(screen.queryByTestId("speed-graph")).toBeNull();
     expect(screen.queryByTestId("speed-gauge")).toBeNull();
@@ -233,7 +231,7 @@ describe("LiveTestDashboard — shared scale", () => {
     const { rerender } = await renderDashboard(
       presentationFor({
         stageId: DOWNLOAD,
-        progress: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1, 11_250_000) },
+        stageProgress: { runId: RUN, entries: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1, 11_250_000) } },
       }),
     );
     // 90 Mbps rounds the shared ceiling up to 100; the gauge prints it as
@@ -246,7 +244,7 @@ describe("LiveTestDashboard — shared scale", () => {
       <LiveTestDashboard
         presentation={presentationFor({
           stageId: UPLOAD,
-          progress: { [edgeKey(UPLOAD, 0)]: snapshot(UPLOAD, 0, 125_000) },
+          stageProgress: { runId: RUN, entries: { [edgeKey(UPLOAD, 0)]: snapshot(UPLOAD, 0, 125_000) } },
         })}
         createScene={stubScene}
       />,

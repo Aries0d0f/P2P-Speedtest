@@ -20,23 +20,9 @@
 import * as THREE from "three";
 
 import maskUrl from "~/assets/world-land-mask.png";
-import {
-  IDENTITY_QUAT,
-  MIN_CAMERA_DISTANCE,
-  clamp,
-  fibonacciSphere,
-  latLonToVector,
-  planRoute,
-  projectedNorthTiltDeg,
-  recommendedCameraDistance,
-  routePointAt,
-  targetOrientation,
-  vectorToUv,
-  type Quat,
-  type RoutePlan,
-  type Vec3,
-} from "~/lib/globe-math";
-import type { VisualLocation } from "~/lib/test-visualization";
+import { IDENTITY_QUAT, MIN_CAMERA_DISTANCE, clamp, fibonacciSphere, geoPointToVector, planRoute, projectedNorthTiltDeg, recommendedCameraDistance, routePointAt, targetOrientation, vectorToUv, type RoutePlan } from "~/lib/globe-math";
+import type { Quat, Vec3 } from "~/model/globe.model";
+import type { GeoPoint } from "~/model/geo.model";
 
 import {
   QUALITY,
@@ -46,7 +32,7 @@ import {
   type GlobeSceneOptions,
   type LabelPlacement,
   type LabelPlacements,
-} from "./globe-scene";
+} from "~/model/globe.model";
 
 const CAMERA_FOV = 38;
 /** Short of the degenerate 180°, where a perspective projection blows up. */
@@ -75,7 +61,7 @@ const SPEED_REFERENCE_MBPS = 400;
 const ORIENTATION_SECONDS = 1.1;
 const CAMERA_LERP_PER_SECOND = 2.2;
 
-function sameLocation(a: VisualLocation | null, b: VisualLocation | null): boolean {
+function sameLocation(a: GeoPoint | null, b: GeoPoint | null): boolean {
   if (a === null || b === null) return a === b;
   return a.lat === b.lat && a.lon === b.lon;
 }
@@ -244,7 +230,7 @@ export async function createGlobeScene(options: GlobeSceneOptions): Promise<Glob
       fragmentShader: /* glsl */ `
         varying vec3 vNormal;
         void main() {
-          float rim = pow(1.0 - abs(vNormal.z), 3.0);
+          float rim = pow(0.5 - abs(vNormal.z), 2.0);
           gl_FragColor = vec4(0.35, 0.62, 0.95, rim * 0.45);
         }
       `,
@@ -424,8 +410,8 @@ export async function createGlobeScene(options: GlobeSceneOptions): Promise<Glob
   }
 
   function applyLocations(next: GlobeFrame) {
-    localVec = next.localLocation ? latLonToVector(next.localLocation) : null;
-    remoteVec = next.remoteLocation ? latLonToVector(next.remoteLocation) : null;
+    localVec = next.localLocation ? geoPointToVector(next.localLocation) : null;
+    remoteVec = next.remoteLocation ? geoPointToVector(next.remoteLocation) : null;
 
     localMarker.group.visible = localVec !== null;
     if (localVec) {

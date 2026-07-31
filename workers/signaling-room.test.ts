@@ -5,7 +5,7 @@ import {
 } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { beforeEach, describe, expect, it } from "vitest";
-import type { Envelope } from "~/lib/protocol";
+import type { Envelope } from "~/model/signaling.model";
 import { setTimingForTesting } from "./signaling-room";
 import {
   getCurrentTestConfig,
