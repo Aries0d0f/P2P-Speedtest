@@ -128,10 +128,11 @@ describe("SpeedGauge", () => {
     });
     render(<SpeedGauge presentation={presentation} ceiling={20} reducedMotion />);
 
-    // 10 of 20 Mbps is half scale; no frames have run, so this must already
-    // be correct rather than waiting for a tween.
+    // 10 of 20 Mbps is half scale, which points the needle straight up; no
+    // frames have run, so this must already be correct rather than waiting
+    // for a tween.
     const needle = screen.getByTestId(`gauge-channel-${edgeKey(DOWNLOAD, 1)}`).querySelector("line");
-    expect(needle?.getAttribute("transform")).toContain("rotate(-90");
+    expect(needle?.getAttribute("transform")).toContain("rotate(0");
   });
 
   it("shows the shared ceiling so the scale is legible", () => {
