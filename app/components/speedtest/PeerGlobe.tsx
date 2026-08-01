@@ -1,4 +1,4 @@
-import { useCallback, useRef } from "react";
+import { useCallback, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { useDocumentVisible } from "~/hooks/document-visible.hook";
@@ -9,7 +9,7 @@ import { usePrefersReducedMotion } from "~/hooks/reduced-motion.hook";
 import type { GlobeSceneFactory, LabelPlacements } from "~/model/globe.model";
 import type { LiveTestPresentation } from "~/model/presentation.model";
 
-import { MarkerLabel, placeLabel } from "./GlobeMarkerLabel";
+import { INITIAL_SIDES, MarkerLabel, placeLabel, sidesFor } from "./GlobeMarkerLabel";
 
 /**
  * The peer globe (6.2, 6.3).
@@ -65,9 +65,21 @@ export function PeerGlobe({
     portalHost,
   );
 
+  // Which way the labels face is the one part of their placement React owns:
+  // it decides Tailwind classes, and it changes a handful of times per
+  // rotation rather than every frame. `sidesFor` returns the same object while
+  // the answer holds, so the common frame does no work at all.
+  const [sides, setSides] = useState(INITIAL_SIDES);
+  const sidesRef = useRef(sides);
+
   const applyLabels = useCallback((placements: LabelPlacements) => {
-    placeLabel(localLabelRef.current, placements.local);
-    placeLabel(remoteLabelRef.current, placements.remote);
+    const next = sidesFor(placements, sidesRef.current);
+    if (next !== sidesRef.current) {
+      sidesRef.current = next;
+      setSides(next);
+    }
+    placeLabel(localLabelRef.current, placements.local, next.local);
+    placeLabel(remoteLabelRef.current, placements.remote, next.remote);
   }, []);
 
   const { failed } = useGlobeScene(
@@ -132,14 +144,14 @@ export function PeerGlobe({
               name={`${localPeer.name} (You)`}
               peer={localPeer}
               present={localPeer.location !== null}
-              type="local"
+              position={sides.local}
             />
             <MarkerLabel
               ref={remoteLabelRef}
               name={remotePeer.name}
               peer={remotePeer}
               present={remotePeer.location !== null}
-              type="remote"
+              position={sides.remote}
             />
           </div>,
           portalHost,

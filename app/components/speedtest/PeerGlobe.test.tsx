@@ -10,7 +10,7 @@ import type { StageProgress } from "~/model/measurement.model";
 
 import { PeerGlobe } from "./PeerGlobe";
 import { buildFrame } from "~/lib/globe-frame";
-import type { GlobeDiagnostics, GlobeFrame, GlobeScene, GlobeSceneFactory, GlobeSceneOptions } from "~/model/globe.model";
+import type { GlobeDiagnostics, GlobeFrame, GlobeScene, GlobeSceneFactory, GlobeSceneOptions, LabelPlacement } from "~/model/globe.model";
 
 const RUN = "run-1";
 const TOKYO = { lat: 35.6762, lon: 139.6503 };
@@ -452,5 +452,68 @@ describe("PeerGlobe — failure isolation", () => {
     rerender(<PeerGlobe presentation={presentationFor({ stageId: DOWNLOAD })} createScene={factory} />);
     await flush();
     expect(createCount).toBe(1);
+  });
+});
+
+describe("PeerGlobe — labels take opposite sides", () => {
+  const AT = (x: number, visible = true) => ({ x, y: 200, visible });
+
+  /** Renders both markers, then drives one frame of label placement. */
+  async function withLabels() {
+    const { factory } = makeFactory();
+    render(<PeerGlobe presentation={presentationFor()} createScene={factory} />);
+    await flush();
+    const send = async (local: LabelPlacement | null, remote: LabelPlacement | null) => {
+      await act(async () => created[0].options.onLabels({ local, remote }));
+    };
+    const local = () => screen.getByText("Local (You)").parentElement!;
+    const remote = () => screen.getByText("Remote").parentElement!;
+    return { send, local, remote };
+  }
+
+  it("hangs each label away from the other marker", async () => {
+    const { send, local, remote } = await withLabels();
+    // Local projects to the left of remote, so its label ends at its marker
+    // and remote's starts at its own — the pair opens outward.
+    await send(AT(300), AT(900));
+    expect(local().className).toContain("text-right");
+    expect(local().style.transform).toBe(
+      "translate(300px, 200px) translate(calc(-100% - 8px), -140%)",
+    );
+    expect(remote().className).toContain("text-left");
+    expect(remote().style.transform).toBe("translate(900px, 200px) translate(8px, -140%)");
+  });
+
+  it("swaps both sides when the markers cross", async () => {
+    const { send, local, remote } = await withLabels();
+    await send(AT(300), AT(900));
+    await send(AT(900), AT(300));
+    expect(local().className).toContain("text-left");
+    expect(remote().className).toContain("text-right");
+    // Never the same side: that is the overlap the flip exists to prevent.
+    expect(local().style.transform).toBe("translate(900px, 200px) translate(8px, -140%)");
+    expect(remote().style.transform).toBe(
+      "translate(300px, 200px) translate(calc(-100% - 8px), -140%)",
+    );
+  });
+
+  it("holds its sides while the markers pass within the flip margin", async () => {
+    const { send, local } = await withLabels();
+    await send(AT(300), AT(900));
+    // 16px apart and now on the wrong side of each other, but inside the
+    // margin — flipping here is the flicker the band exists to stop.
+    await send(AT(608), AT(592));
+    expect(local().className).toContain("text-right");
+    await send(AT(700), AT(500));
+    expect(local().className).toContain("text-left");
+  });
+
+  it("leaves the sides alone while a marker is behind the globe", async () => {
+    const { send, local, remote } = await withLabels();
+    await send(AT(300), AT(900));
+    await send(AT(300), AT(100, false));
+    expect(local().className).toContain("text-right");
+    // A hidden marker's label is not merely off-side, it is not drawn.
+    expect(remote().style.display).toBe("none");
   });
 });
