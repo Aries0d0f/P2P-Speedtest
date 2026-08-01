@@ -1,15 +1,16 @@
 import { useEffect } from "react";
 
-import { prefetchGeo } from "~/lib/geo";
+import { prefetchSelfLookup } from "~/lib/geo";
 import { buildEnrichmentProfileMessage } from "~/lib/peer-profile";
 import type { ConfirmedProfile, PeerProfile } from "~/model/peer.model";
 
 /**
- * Starts the geo lookup at mount — during the waiting screen, before the
- * visitor has decided whether to join. It is slower than everything around it,
- * so waiting until the control channel opens left the globe marker-less for a
- * round trip after pairing. It shares nothing on its own: what leaves this
- * browser is still decided by the privacy level, at send time.
+ * Starts the self lookup — public address and geo — at mount, during the
+ * waiting screen, before the visitor has decided whether to join. It is slower
+ * than everything around it, so waiting until the control channel opens left
+ * the globe marker-less for a round trip after pairing, and left the initial
+ * profile with no address to carry at all. It shares nothing on its own: what
+ * leaves this browser is still decided by the privacy level, at send time.
  *
  * Also publishes a *provisional* self marker as soon as the lookup lands, so
  * the waiting screen has something true on it. Display only — the profile that
@@ -24,18 +25,28 @@ export function useGeoPrefetch(
 ): void {
   useEffect(() => {
     if (!enabled) return;
-    void prefetchGeo();
+    void prefetchSelfLookup();
   }, [enabled]);
 
   useEffect(() => {
     if (!profile) return;
     let cancelled = false;
-    void prefetchGeo().then((geo) => {
-      if (cancelled || !geo) return;
-      // No address yet — there is no peer connection to read one from — but
-      // the privacy projection is the same one the wire message uses.
-      onProvisionalSelfProfile(buildEnrichmentProfileMessage(profile, userAgent, {}, geo));
-    });
+    void prefetchSelfLookup()
+      .then(async (lookup) => {
+        if (cancelled || (!lookup.geo && !lookup.address.ip)) return;
+        // The lookup's own address stands in for the ICE-derived one, which
+        // needs a peer connection that doesn't exist yet; the privacy
+        // projection is the same one the wire message uses.
+        const provisional = await buildEnrichmentProfileMessage(
+          profile,
+          userAgent,
+          lookup.address,
+          lookup.geo,
+        );
+        if (cancelled) return;
+        onProvisionalSelfProfile(provisional);
+      })
+      .catch((err) => console.warn("provisional self profile failed", err));
     return () => {
       cancelled = true;
     };

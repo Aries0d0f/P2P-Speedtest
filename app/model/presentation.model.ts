@@ -18,7 +18,7 @@ import type { Slot } from "./signaling.model";
 import type { StageId, StageName } from "./stage.model";
 import type { ConnectionType } from "./connection.model";
 import type { Latency } from "./measurement.model";
-import type { PeerData } from "./peer.model";
+import type { DeviceInfo, PeerData } from "./peer.model";
 import type { RoomPhase, RoomState } from "./room.model";
 
 /** Relative to *this* browser, never to a slot. */
@@ -37,11 +37,18 @@ export type TransferToken =
  * privacy-projected at the sender, so these are exactly the fields that peer
  * chose to disclose — an absent one means withheld, never unknown.
  */
-export type PeerView = Pick<PeerData, "slot" | "name" | "ua" | "ip" | "protocol" | "geo"> & {
+export type PeerView = Pick<
+  PeerData,
+  "slot" | "name" | "ua" | "device" | "ip" | "protocol" | "geo"
+> & {
   /** `geo` narrowed to a usable pair of coordinates: `null` whenever the peer
    * withheld, failed to look up, or has not yet sent them. Never inferred from
    * an IP or any other source. */
   location: GeoPoint | null;
+  /** What to draw for this peer: the descriptor it sent, or failing that what
+   * its disclosed `ua` gives up — the only two sources, so a peer that shared
+   * neither is drawn as unknown rather than as whoever is reading. */
+  icon: DeviceInfo | null;
   /** True once this peer's profile has arrived at all, so the UI can say
    * "hidden" rather than "still waiting". */
   profileKnown: boolean;

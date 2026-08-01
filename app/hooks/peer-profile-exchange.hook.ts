@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from "react";
 
-import { prefetchGeo } from "~/lib/geo";
+import { peekSelfAddress, prefetchSelfLookup } from "~/lib/geo";
 import { encodeControlMessage } from "~/lib/control-message";
 import {
   buildEnrichmentProfileMessage,
@@ -8,7 +8,7 @@ import {
   sanitizeIncomingProfile,
   validateInitialProfile,
 } from "~/lib/peer-profile";
-import type { OwnAddress } from "~/model/connection.model";
+import { resolveOwnAddress, type OwnAddress } from "~/model/connection.model";
 import type { PeerProfile } from "~/model/peer.model";
 import type { RoomRunContext } from "~/model/room.model";
 import { useLatest } from "./latest.hook";
@@ -78,10 +78,19 @@ export function usePeerProfileExchange(
       if (!self || !runId) return;
       const o = latest.current;
 
-      const address = await o.getOwnAddress();
+      // The prefetched address is *peeked*, not awaited: this message gates
+      // pairing. If the lookup hasn't landed yet, the enrichment below sends
+      // the address a moment later.
+      const address = resolveOwnAddress(await o.getOwnAddress(), peekSelfAddress());
       if (ctx.current.terminal || ctx.current.runId !== runId) return;
 
-      const initial = buildInitialProfileMessage(ctx.current.profile, o.userAgent, address, self.slot);
+      const initial = await buildInitialProfileMessage(
+        ctx.current.profile,
+        o.userAgent,
+        address,
+        self.slot,
+      );
+      if (ctx.current.terminal || ctx.current.runId !== runId) return;
       ctx.current.selfProfile = initial;
       o.onSelfProfile(initial);
       if (initial.timestamp) o.onRunTimestamp(initial.timestamp); // slot 0 only (S6)
@@ -94,22 +103,27 @@ export function usePeerProfileExchange(
       initialSentRef.current = true;
       maybeComplete();
 
-      // Geo enrichment: fire-and-forget, never blocks or re-gates pairing, and
-      // a failure anywhere in this tail must never be mistaken for the initial
-      // send above already having failed.
+      // Address and geo enrichment: fire-and-forget, never blocks or re-gates
+      // pairing, and a failure anywhere in this tail must never be mistaken
+      // for the initial send above already having failed.
+      //
+      // This is the send that guarantees an `ip` reaches the peer: unlike the
+      // initial message it awaits the lookup, so an address is missing here
+      // only if both ICE and the endpoint had nothing.
       try {
         // Normally already resolved by the prefetch at mount, so the enriched
         // profile goes out on the heels of the initial one.
-        const geo = await prefetchGeo();
+        const lookup = await prefetchSelfLookup();
         if (ctx.current.terminal || ctx.current.runId !== runId) return;
-        const freshAddress = await o.getOwnAddress();
+        const freshAddress = resolveOwnAddress(await o.getOwnAddress(), lookup.address);
         if (ctx.current.terminal || ctx.current.runId !== runId) return;
-        const enrichment = buildEnrichmentProfileMessage(
+        const enrichment = await buildEnrichmentProfileMessage(
           ctx.current.profile,
           o.userAgent,
           freshAddress,
-          geo,
+          lookup.geo,
         );
+        if (ctx.current.terminal || ctx.current.runId !== runId) return;
         ctx.current.selfProfile = enrichment;
         o.onSelfProfile(enrichment);
         channel.send(encodeControlMessage({ type: "peer-profile", runId, payload: enrichment }));

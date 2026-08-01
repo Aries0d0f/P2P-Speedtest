@@ -10,6 +10,56 @@ import type { Slot } from "./signaling.model";
 export type PrivacyLevel = "off" | "on" | "anonymous";
 export type IpProtocol = "IPv4" | "IPv6";
 
+export const DEVICE_TYPES = ["mobile", "tablet", "desktop"] as const;
+
+/**
+ * The platform badges this app can draw, and so the only values `brand` may
+ * take. Distributions are listed individually because a Linux user's
+ * distribution is the badge they recognize; `linux` is the generic mark for
+ * the rest.
+ */
+export const DEVICE_BRANDS = [
+  "apple",
+  "microsoft",
+  "google",
+  "linux",
+  "arch",
+  "centos",
+  "debian",
+  "deepin",
+  "elementary",
+  "fedora",
+  "gentoo",
+  "gnu",
+  "kubuntu",
+  "manjaro",
+  "mint",
+  "raspbian",
+  "redhat",
+  "slackware",
+  "suse",
+  "ubuntu",
+  "xubuntu",
+] as const;
+
+export type DeviceType = (typeof DEVICE_TYPES)[number];
+export type DeviceBrand = (typeof DEVICE_BRANDS)[number];
+
+/**
+ * Exactly what the other side needs to draw this peer's icon — a form factor
+ * and a platform badge, nothing finer. A sender knows its own hardware better
+ * than any receiver can (client hints answer what a reduced UA string no
+ * longer says), so at privacy Off it tells the peer rather than making it
+ * guess. Neither field is a model name or an OS version: those live in `ua`,
+ * which the privacy table governs separately.
+ */
+export interface DeviceInfo {
+  /** Absent when the platform reported no form factor at all. */
+  type?: DeviceType;
+  /** Absent when the platform is not one this app has a badge for. */
+  brand?: DeviceBrand;
+}
+
 export interface PeerData {
   id: string;
   slot: Slot;
@@ -18,6 +68,8 @@ export interface PeerData {
    * builders, and no projection below carries it. */
   privacyLevel: PrivacyLevel;
   ua?: string;
+  /** Travels with `ua` — same privacy level, same disclosure. */
+  device?: DeviceInfo;
   ip?: string;
   protocol?: IpProtocol;
   geo?: GeoInfo;
@@ -63,6 +115,26 @@ export function sanitizeText(value: unknown, maxLength: number): string | null {
   const stripped = value.replace(/[\x00-\x1f\x7f]/g, "").trim();
   if (!stripped) return null;
   return stripped.slice(0, maxLength);
+}
+
+/**
+ * Both fields are closed enumerations, so an untrusted peer can only ever
+ * select one of this app's own icons — never inject a string the view would
+ * render. Returns `null` when nothing recognizable survives, which keeps an
+ * empty `{}` off the wire and out of the merged profile.
+ */
+export function sanitizeDevice(value: unknown): DeviceInfo | null {
+  if (typeof value !== "object" || value === null) return null;
+  const raw = value as Record<string, unknown>;
+
+  const result: DeviceInfo = {};
+  if (typeof raw.type === "string" && (DEVICE_TYPES as readonly string[]).includes(raw.type)) {
+    result.type = raw.type as DeviceType;
+  }
+  if (typeof raw.brand === "string" && (DEVICE_BRANDS as readonly string[]).includes(raw.brand)) {
+    result.brand = raw.brand as DeviceBrand;
+  }
+  return result.type || result.brand ? result : null;
 }
 
 export function maskIp(ip: string, protocol: IpProtocol): string {

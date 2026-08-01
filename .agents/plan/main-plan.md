@@ -141,16 +141,18 @@ Public surfaces:
 - The Durable Object assigns each accepted socket a new UUIDv5 `peer-id`.
   The id is server-issued, run-local, and changes when a stale slot is taken
   over.
-- Each browser sends its own name and optional user-agent, address, protocol,
-  and geolocation directly to the other peer over the encrypted data channel.
-  Geo lookup is best effort and never blocks pairing.
+- Each browser sends its own name and optional user-agent, device descriptor,
+  address, protocol, and geolocation directly to the other peer over the
+  encrypted data channel. Geo lookup is best effort and never blocks pairing.
+- The device descriptor is a form factor and a platform badge — enough for the
+  peer to draw an icon, and never more than the user-agent already says.
 - Each peer independently chooses a privacy level before joining:
 
-  | Level | Name | User-agent | IP | Geo |
-  |---|---|---|---|---|
-  | Off (default) | shared | shared | full | full |
-  | On | shared | omitted | full | full |
-  | Anonymous | shared | omitted | masked | `proxy` and `hosting` only |
+  | Level | Name | User-agent | Device | IP | Geo |
+  |---|---|---|---|---|---|
+  | Off (default) | shared | shared | shared | full | full |
+  | On | shared | omitted | omitted | full | full |
+  | Anonymous | shared | omitted | omitted | masked | `proxy` and `hosting` only |
 
 - Application-profile withholding and masking happen before that profile
   leaves the sender.

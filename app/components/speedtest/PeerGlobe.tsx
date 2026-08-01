@@ -42,7 +42,11 @@ const defaultFactory: GlobeSceneFactory = async (options) => {
   return module.createGlobeScene(options);
 };
 
-export function PeerGlobe({ presentation, createScene, onVisualError }: PeerGlobeProps) {
+export function PeerGlobe({
+  presentation,
+  createScene,
+  onVisualError,
+}: PeerGlobeProps) {
   const placeholderRef = useRef<HTMLDivElement>(null);
   const layerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -51,9 +55,15 @@ export function PeerGlobe({ presentation, createScene, onVisualError }: PeerGlob
 
   const reducedMotion = usePrefersReducedMotion();
   const documentVisible = useDocumentVisible();
-  const portalHost = usePortalHost("data-globe-layer-host", MAIN_STATIC_WARNING);
+  const portalHost = usePortalHost(
+    "data-globe-layer-host",
+    MAIN_STATIC_WARNING,
+  );
   // `portalHost` gates the layer's existence, so re-measure once it lands.
-  const [reference, box] = useElementBoxes([placeholderRef, layerRef], portalHost);
+  const [reference, box] = useElementBoxes(
+    [placeholderRef, layerRef],
+    portalHost,
+  );
 
   const applyLabels = useCallback((placements: LabelPlacements) => {
     placeLabel(localLabelRef.current, placements.local);
@@ -84,7 +94,8 @@ export function PeerGlobe({ presentation, createScene, onVisualError }: PeerGlob
         className="surface-panel relative flex min-h-[12rem] w-full items-center justify-center rounded-2xl border border-dashed border-gray-300 p-4 text-center dark:border-gray-700"
       >
         <p className="text-xs text-gray-500 dark:text-gray-400">
-          The globe couldn't be shown on this device. Every measurement below is unaffected.
+          The globe couldn't be shown on this device. Every measurement below is
+          unaffected.
         </p>
       </div>
     );
@@ -111,14 +122,25 @@ export function PeerGlobe({ presentation, createScene, onVisualError }: PeerGlob
             className="pointer-events-none fixed inset-0 overflow-hidden"
           >
             {/* Decorative: peers, locations, direction and speed all exist as text. */}
-            <canvas ref={canvasRef} aria-hidden="true" className="block h-full w-full" />
+            <canvas
+              ref={canvasRef}
+              aria-hidden="true"
+              className="block h-full w-full"
+            />
             <MarkerLabel
               ref={localLabelRef}
               name={`${localPeer.name} (You)`}
               peer={localPeer}
               present={localPeer.location !== null}
+              type="local"
             />
-            <MarkerLabel ref={remoteLabelRef} name={remotePeer.name} peer={remotePeer} present={remotePeer.location !== null} />
+            <MarkerLabel
+              ref={remoteLabelRef}
+              name={remotePeer.name}
+              peer={remotePeer}
+              present={remotePeer.location !== null}
+              type="remote"
+            />
           </div>,
           portalHost,
         )}

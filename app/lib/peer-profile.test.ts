@@ -4,6 +4,8 @@ import {
   buildInitialProfileMessage,
   defaultNameForLevel,
   defaultProfile,
+  describeDevice,
+  guessDevice,
   loadStoredProfile,
   nameFromUserAgent,
   sanitizeIncomingProfile,
@@ -18,6 +20,18 @@ const CHROME_MAC_UA =
 const IPHONE_UA =
   "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1";
 const GENERIC_MOBILE_UA = "Mozilla/5.0 (Mobile; rv:120.0) Gecko/120.0 Firefox/120.0";
+const ANDROID_UA =
+  "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36";
+const WINDOWS_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+const UBUNTU_UA =
+  "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0";
+const FEDORA_UA =
+  "Mozilla/5.0 (X11; Fedora; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0";
+const ARCH_UA = "Mozilla/5.0 (X11; Arch Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0";
+// A distribution UAParser names but this app has no logo for.
+const MAGEIA_UA =
+  "Mozilla/5.0 (X11; Mageia; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0";
 
 // This vitest pool runs on workerd, which has no `localStorage` — stub an
 // in-memory implementation so the persistence round-trip is testable.
@@ -51,6 +65,51 @@ describe("nameFromUserAgent", () => {
 
   it("falls back to a neutral label for an unparsable UA", async () => {
     expect(await nameFromUserAgent("")).toBe("Unknown device");
+  });
+});
+
+describe("describeDevice / guessDevice", () => {
+  it("reduces a UA to a form factor and a platform badge, and nothing else", async () => {
+    expect(await describeDevice(IPHONE_UA)).toEqual({ type: "mobile", brand: "apple" });
+    expect(await describeDevice(ANDROID_UA)).toEqual({ type: "mobile", brand: "google" });
+    expect(await describeDevice(WINDOWS_UA)).toEqual({ type: "desktop", brand: "microsoft" });
+  });
+
+  it("badges a Linux peer with its distribution, which is the mark it knows", () => {
+    expect(guessDevice(UBUNTU_UA)?.brand).toBe("ubuntu");
+    expect(guessDevice(FEDORA_UA)?.brand).toBe("fedora");
+    expect(guessDevice(ARCH_UA)?.brand).toBe("arch");
+  });
+
+  it("falls back to the generic penguin for a distribution with no mark", () => {
+    // Recognized as Linux, just not as a logo this app ships.
+    expect(guessDevice(MAGEIA_UA)?.brand).toBe("linux");
+  });
+
+  it("reads an absent UA type as a desktop, which is the one type UAParser omits", () => {
+    expect(guessDevice(CHROME_MAC_UA)).toEqual({ type: "desktop", brand: "apple" });
+  });
+
+  it("badges nothing when the platform is not one this app draws", () => {
+    // A generic mobile UA: the form factor is known, the platform is not, and
+    // an invented badge would be worse than none.
+    expect(guessDevice(GENERIC_MOBILE_UA)).toEqual({ type: "mobile" });
+  });
+
+  it("never answers for a peer that withheld its UA — that would be this browser's own", () => {
+    // UAParser with no argument reads `navigator.userAgent`, which would draw
+    // the reader's own device as the peer's.
+    expect(guessDevice(undefined)).toBeNull();
+    expect(guessDevice("")).toBeNull();
+  });
+
+  it("lets a tablet name overrule a desktop-looking UA", () => {
+    // iPadOS Safari identifies as a Mac; the sender's feature-checked name is
+    // the only thing left that knows better.
+    expect(guessDevice(CHROME_MAC_UA, "Safari on iPad")).toEqual({
+      type: "tablet",
+      brand: "apple",
+    });
   });
 });
 
@@ -105,18 +164,24 @@ const ADDRESS_V4: OwnAddress = { ip: "203.0.113.7", protocol: "IPv4" };
 const NO_ADDRESS: OwnAddress = {};
 
 describe("buildInitialProfileMessage", () => {
-  it("Off shares name, ua, and full ip", () => {
-    const msg = buildInitialProfileMessage(
+  it("Off shares name, ua, device, and full ip", async () => {
+    const msg = await buildInitialProfileMessage(
       { name: "Alice", privacyLevel: "off" },
       CHROME_MAC_UA,
       ADDRESS_V4,
       1,
     );
-    expect(msg).toEqual({ name: "Alice", ua: CHROME_MAC_UA, ip: "203.0.113.7", protocol: "IPv4" });
+    expect(msg).toEqual({
+      name: "Alice",
+      ua: CHROME_MAC_UA,
+      device: { type: "desktop", brand: "apple" },
+      ip: "203.0.113.7",
+      protocol: "IPv4",
+    });
   });
 
-  it("On withholds ua but shares full ip", () => {
-    const msg = buildInitialProfileMessage(
+  it("On withholds ua and device but shares full ip", async () => {
+    const msg = await buildInitialProfileMessage(
       { name: "Alice", privacyLevel: "on" },
       CHROME_MAC_UA,
       ADDRESS_V4,
@@ -125,8 +190,8 @@ describe("buildInitialProfileMessage", () => {
     expect(msg).toEqual({ name: "Alice", ip: "203.0.113.7", protocol: "IPv4" });
   });
 
-  it("Anonymous withholds ua and masks ip", () => {
-    const msg = buildInitialProfileMessage(
+  it("Anonymous withholds ua and device, and masks ip", async () => {
+    const msg = await buildInitialProfileMessage(
       { name: "Alice", privacyLevel: "anonymous" },
       CHROME_MAC_UA,
       ADDRESS_V4,
@@ -135,24 +200,38 @@ describe("buildInitialProfileMessage", () => {
     expect(msg).toEqual({ name: "Alice", ip: "203.xxx.xxx.7", protocol: "IPv4" });
   });
 
-  it("omits ip/protocol entirely when no address is known yet, at any level", () => {
-    const msg = buildInitialProfileMessage(
+  it("omits ip/protocol entirely when no address is known yet, at any level", async () => {
+    const msg = await buildInitialProfileMessage(
       { name: "Alice", privacyLevel: "off" },
       CHROME_MAC_UA,
       NO_ADDRESS,
       1,
     );
-    expect(msg).toEqual({ name: "Alice", ua: CHROME_MAC_UA });
+    expect(msg).toEqual({
+      name: "Alice",
+      ua: CHROME_MAC_UA,
+      device: { type: "desktop", brand: "apple" },
+    });
   });
 
-  it("stamps a timestamp only for slot 0", () => {
-    const fromSlot0 = buildInitialProfileMessage(
+  it("omits device when the UA describes no device at all", async () => {
+    const msg = await buildInitialProfileMessage(
+      { name: "Alice", privacyLevel: "off" },
+      "",
+      NO_ADDRESS,
+      1,
+    );
+    expect(msg.device).toBeUndefined();
+  });
+
+  it("stamps a timestamp only for slot 0", async () => {
+    const fromSlot0 = await buildInitialProfileMessage(
       { name: "Alice", privacyLevel: "off" },
       CHROME_MAC_UA,
       NO_ADDRESS,
       0,
     );
-    const fromSlot1 = buildInitialProfileMessage(
+    const fromSlot1 = await buildInitialProfileMessage(
       { name: "Alice", privacyLevel: "off" },
       CHROME_MAC_UA,
       NO_ADDRESS,
@@ -165,8 +244,8 @@ describe("buildInitialProfileMessage", () => {
 });
 
 describe("buildEnrichmentProfileMessage", () => {
-  it("Anonymous projects geo down to proxy/hosting only", () => {
-    const msg = buildEnrichmentProfileMessage(
+  it("Anonymous projects geo down to proxy/hosting only", async () => {
+    const msg = await buildEnrichmentProfileMessage(
       { name: "Alice", privacyLevel: "anonymous" },
       CHROME_MAC_UA,
       ADDRESS_V4,
@@ -174,12 +253,13 @@ describe("buildEnrichmentProfileMessage", () => {
     );
     expect(msg.geo).toEqual({ proxy: false, hosting: true });
     expect(msg.ua).toBeUndefined();
+    expect(msg.device).toBeUndefined();
     expect(msg.ip).toBe("203.xxx.xxx.7");
   });
 
-  it("Off and On pass geo through untouched", () => {
+  it("Off and On pass geo through untouched", async () => {
     const geo = { country: "Testland" };
-    const msg = buildEnrichmentProfileMessage(
+    const msg = await buildEnrichmentProfileMessage(
       { name: "Alice", privacyLevel: "off" },
       CHROME_MAC_UA,
       ADDRESS_V4,
@@ -188,8 +268,18 @@ describe("buildEnrichmentProfileMessage", () => {
     expect(msg.geo).toEqual(geo);
   });
 
-  it("omits geo entirely when the lookup failed", () => {
-    const msg = buildEnrichmentProfileMessage(
+  it("resends the device descriptor, so the enrichment stands alone", async () => {
+    const msg = await buildEnrichmentProfileMessage(
+      { name: "Alice", privacyLevel: "off" },
+      IPHONE_UA,
+      ADDRESS_V4,
+      null,
+    );
+    expect(msg.device).toEqual({ type: "mobile", brand: "apple" });
+  });
+
+  it("omits geo entirely when the lookup failed", async () => {
+    const msg = await buildEnrichmentProfileMessage(
       { name: "Alice", privacyLevel: "off" },
       CHROME_MAC_UA,
       ADDRESS_V4,
@@ -205,6 +295,7 @@ describe("sanitizeIncomingProfile", () => {
       sanitizeIncomingProfile({
         name: "Bob",
         ua: "some-ua",
+        device: { type: "tablet", brand: "apple" },
         ip: "203.0.113.9",
         protocol: "IPv4",
         geo: { country: "Testland", lat: 12.5 },
@@ -212,10 +303,26 @@ describe("sanitizeIncomingProfile", () => {
     ).toEqual({
       name: "Bob",
       ua: "some-ua",
+      device: { type: "tablet", brand: "apple" },
       ip: "203.0.113.9",
       protocol: "IPv4",
       geo: { country: "Testland", lat: 12.5 },
     });
+  });
+
+  it("keeps a peer's device to this app's own icons, dropping anything else", () => {
+    // Both fields are closed enumerations, so a hostile peer can pick an icon
+    // but can never introduce a string the view would render.
+    expect(
+      sanitizeIncomingProfile({
+        name: "Bob",
+        device: { type: "<script>", brand: "apple", model: "iPhone 15 Pro" },
+      })?.device,
+    ).toEqual({ brand: "apple" });
+    expect(
+      sanitizeIncomingProfile({ name: "Bob", device: { type: "smartfridge" } })?.device,
+    ).toBeUndefined();
+    expect(sanitizeIncomingProfile({ name: "Bob", device: "mobile" })?.device).toBeUndefined();
   });
 
   it("returns null when name is missing or empty after stripping", () => {

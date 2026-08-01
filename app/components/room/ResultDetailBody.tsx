@@ -94,12 +94,11 @@ export function ResultDetailBody({ result }: { result: P2PSpeedtestResult }) {
   const nameFor = (id: string) => data.peers.find((p) => p.id === id)?.name ?? id;
   return (
         <div className="flex w-full max-w-2xl flex-col gap-6">
-          <section className="flex flex-col items-center gap-2 rounded-2xl border border-gray-200 p-5 text-center dark:border-gray-700">
+          <section className="surface-panel flex flex-col items-center gap-2 rounded-2xl border border-gray-200 p-5 text-center dark:border-gray-700">
             <p className="text-xs text-gray-500 dark:text-gray-400">
               {new Date(data.timestamp).toLocaleString()}
             </p>
             <p className="text-base font-medium text-gray-900 dark:text-gray-100">{data.status}</p>
-            <ConnectionBadge type={data.via} />
           </section>
 
           {/* Only worth drawing when at least one peer shared a
@@ -120,15 +119,6 @@ export function ResultDetailBody({ result }: { result: P2PSpeedtestResult }) {
               </Suspense>
             </LiveVisualizationBoundary>
           )}
-
-          <section className="flex flex-col gap-3">
-            <h2 className="text-sm font-medium text-gray-700 dark:text-gray-200">Peers</h2>
-            <div className="flex flex-col gap-3">
-              {data.peers.map((peer) => (
-                <PeerBlock key={peer.id} peer={peer} />
-              ))}
-            </div>
-          </section>
 
           <section className="surface-panel flex flex-col gap-1 rounded-xl border border-gray-200 p-4 dark:border-gray-700">
             <h2 className="text-sm font-medium text-gray-700 dark:text-gray-200">Bandwidth</h2>
