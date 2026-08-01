@@ -18,8 +18,12 @@ import {
   isPrivacyLevel,
   isValidIp,
   maskIp,
+  sanitizeDevice,
   sanitizeText,
   type ConfirmedProfile,
+  type DeviceBrand,
+  type DeviceInfo,
+  type DeviceType,
   type InitialProfile,
   type PeerProfile,
   type PrivacyLevel,
@@ -55,6 +59,126 @@ export async function nameFromUserAgent(ua: string): Promise<string> {
     // fall through rather than let a parse error block the confirm step.
   }
   return FALLBACK_NAME;
+}
+
+/**
+ * UAParser reports the distribution, not "Linux", for most desktop Linux — so
+ * the badge is the distribution wherever this app has its mark. Keys are
+ * UAParser's own `OSName` spellings; anything Linux-shaped that is missing
+ * here still gets the generic penguin below, and anything unrecognized
+ * entirely gets no badge, because a wrong logo is worse than none.
+ */
+const LINUX_BRANDS: Readonly<Record<string, DeviceBrand>> = {
+  Arch: "arch",
+  CentOS: "centos",
+  Debian: "debian",
+  Deepin: "deepin",
+  "elementary OS": "elementary",
+  Fedora: "fedora",
+  Gentoo: "gentoo",
+  GNU: "gnu",
+  Kubuntu: "kubuntu",
+  Manjaro: "manjaro",
+  Mint: "mint",
+  Raspbian: "raspbian",
+  RedHat: "redhat",
+  Slackware: "slackware",
+  SUSE: "suse",
+  Ubuntu: "ubuntu",
+  "Ubuntu Touch": "ubuntu",
+  Xubuntu: "xubuntu",
+  // Distributions with no mark of their own, kept here so they are still
+  // recognized as Linux rather than falling through to no badge at all.
+  Joli: "linux",
+  Knoppix: "linux",
+  Linpus: "linux",
+  Linspire: "linux",
+  Linux: "linux",
+  Mageia: "linux",
+  Mandriva: "linux",
+  PCLinuxOS: "linux",
+  Sabayon: "linux",
+  VectorLinux: "linux",
+  Zenwalk: "linux",
+};
+
+function brandFor(osName: string | undefined, vendor: string | undefined): DeviceBrand | undefined {
+  if (vendor === "Apple" || osName === "macOS" || osName === "iOS" || osName === "watchOS") {
+    return "apple";
+  }
+  if (vendor === "Microsoft" || osName?.startsWith("Windows")) return "microsoft";
+  if (vendor === "Google" || osName?.startsWith("Android") || osName === "Chrome OS") {
+    return "google";
+  }
+  return osName ? LINUX_BRANDS[osName] : undefined;
+}
+
+/** UAParser has no `desktop` type — it leaves `type` unset for one — so an
+ * absent type is read as a desktop, but only once the UA has identified a
+ * platform at all: on a blank or unparsable one the same absence means
+ * nothing was learned. Console, TV, wearable and XR get no form factor rather
+ * than being forced into one of the three this app draws. */
+function typeFor(uaType: string | undefined, osName: string | undefined): DeviceType | undefined {
+  if (uaType === undefined) return osName ? "desktop" : undefined;
+  if (uaType === "mobile") return "mobile";
+  if (uaType === "tablet") return "tablet";
+  return undefined;
+}
+
+function toDeviceInfo(
+  osName: string | undefined,
+  uaType: string | undefined,
+  vendor: string | undefined,
+): DeviceInfo | null {
+  const info: DeviceInfo = {};
+  const type = typeFor(uaType, osName);
+  const brand = brandFor(osName, vendor);
+  if (type) info.type = type;
+  if (brand) info.brand = brand;
+  return info.type || info.brand ? info : null;
+}
+
+/**
+ * This browser describing its own hardware, for the peer to draw. Async and
+ * feature-checked for the same reason `nameFromUserAgent` is: a reduced UA
+ * string no longer distinguishes an iPad from a Mac, and only the device
+ * itself can settle it (`withFeatureCheck()` reads client hints and touch
+ * support, and is a no-op on any UA but this browser's own).
+ */
+export async function describeDevice(ua: string): Promise<DeviceInfo | null> {
+  try {
+    const { os, device } = await new UAParser(ua).getResult().withFeatureCheck();
+    return toDeviceInfo(os.name, device.type, device.vendor);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The receiver's fallback: what can be read off a peer's raw UA string when
+ * it did not send a `device` of its own — an older peer, or a stored result,
+ * which keeps `ua` but not the descriptor.
+ *
+ * `null` in, `null` out: a peer whose privacy level withheld its UA has told
+ * us nothing about its hardware, and UAParser with no argument would answer
+ * with *this* browser's — showing the reader their own device as the peer's.
+ *
+ * `name` is consulted only for the case a UA string cannot express: a tablet
+ * browser that identifies as a desktop one (iPadOS Safari says Macintosh),
+ * where the sender's own feature-checked name still says "iPad" or "Tab".
+ */
+export function guessDevice(ua: string | undefined, name?: string): DeviceInfo | null {
+  if (!ua) return null;
+  try {
+    const { os, device } = new UAParser(ua).getResult();
+    const info = toDeviceInfo(os.name, device.type, device.vendor);
+    if (info && info.type === "desktop" && name && /tab|pad/i.test(name)) {
+      return { ...info, type: "tablet" };
+    }
+    return info;
+  } catch {
+    return null;
+  }
 }
 
 /** The privacy level controls the *default* name too (S3): announcing a
@@ -110,19 +234,23 @@ export async function defaultProfile(ua: string): Promise<ConfirmedProfile> {
   );
 }
 
-/** `ua`/`ip`/`protocol` per the privacy table (S3). `ip` is already masked by
- * the sender when the level requires it — the receiver never has to know
- * which level produced what it got. */
-function addressFields(
+/** `ua`/`device`/`ip`/`protocol` per the privacy table (S3). `ip` is already
+ * masked by the sender when the level requires it — the receiver never has to
+ * know which level produced what it got. `device` is disclosed with `ua` and
+ * only with it: it says no more than the UA already does, but says it in the
+ * one place that can still answer accurately. */
+async function addressFields(
   profile: ConfirmedProfile,
   ua: string,
   address: OwnAddress,
-): Pick<PeerProfile, "ua" | "ip" | "protocol"> {
+): Promise<Pick<PeerProfile, "ua" | "device" | "ip" | "protocol">> {
   const hasAddress = address.ip !== undefined && address.protocol !== undefined;
 
   if (profile.privacyLevel === "off") {
+    const device = await describeDevice(ua);
     return {
       ua,
+      ...(device ? { device } : {}),
       ...(hasAddress ? { ip: address.ip, protocol: address.protocol } : {}),
     };
   }
@@ -142,15 +270,18 @@ function geoField(profile: ConfirmedProfile, geo: GeoInfo | null): PeerProfile["
 /** Sent as soon as the control channel opens, without waiting on geo (2.6).
  * Slot 0's also carries the canonical run timestamp, captured here rather than
  * at result time so two independently authored timestamps can never occur. */
-export function buildInitialProfileMessage(
+export async function buildInitialProfileMessage(
   profile: ConfirmedProfile,
   ua: string,
   address: OwnAddress,
   slot: Slot,
-): PeerProfile {
+): Promise<PeerProfile> {
+  const fields = await addressFields(profile, ua, address);
   return {
     name: profile.name,
-    ...addressFields(profile, ua, address),
+    ...fields,
+    // Stamped after the await, so the run's canonical timestamp is the moment
+    // the message is actually authored.
     ...(slot === 0 ? { timestamp: new Date().toISOString() } : {}),
   };
 }
@@ -159,16 +290,17 @@ export function buildInitialProfileMessage(
  * available after the initial message. Resends `name`/`ua`/`ip` too, so this
  * is a complete, standalone description rather than a diff the receiver must
  * merge field-by-field. */
-export function buildEnrichmentProfileMessage(
+export async function buildEnrichmentProfileMessage(
   profile: ConfirmedProfile,
   ua: string,
   address: OwnAddress,
   geo: GeoInfo | null,
-): PeerProfile {
+): Promise<PeerProfile> {
   const geoValue = geoField(profile, geo);
+  const fields = await addressFields(profile, ua, address);
   return {
     name: profile.name,
-    ...addressFields(profile, ua, address),
+    ...fields,
     ...(geoValue ? { geo: geoValue } : {}),
   };
 }
@@ -187,6 +319,9 @@ export function sanitizeIncomingProfile(raw: unknown): PeerProfile | null {
 
   const ua = sanitizeText(value.ua, UA_MAX_LENGTH);
   if (ua) result.ua = ua;
+
+  const device = sanitizeDevice(value.device);
+  if (device) result.device = device;
 
   if (typeof value.ip === "string" && isValidIp(value.ip)) {
     result.ip = value.ip;
