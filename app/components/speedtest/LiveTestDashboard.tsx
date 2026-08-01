@@ -1,12 +1,5 @@
 import { useSpeedSeries } from "~/hooks/speed-series.hook";
 import { BsArrows } from "react-icons/bs";
-import {
-  IoTabletPortraitOutline,
-  IoPhonePortraitOutline,
-  IoPhonePortraitSharp,
-  IoLaptopOutline,
-} from "react-icons/io5";
-import { FaApple, FaWindows, FaAndroid, FaLinux, FaQuestion } from "react-icons/fa6";
 import type {
   LiveTestPresentation,
   PeerView,
@@ -16,8 +9,8 @@ import { PeerGlobe } from "./PeerGlobe";
 import { RealtimeSpeedGraph } from "./RealtimeSpeedGraph";
 import { SpeedGauge } from "./SpeedGauge";
 import type { GlobeSceneFactory } from "~/model/globe.model";
+import { usePeerIcon } from "~/hooks/peer-icon.hook";
 import { usePrefersReducedMotion } from "~/hooks/reduced-motion.hook";
-import { UAParser } from "ua-parser-js";
 
 /**
  * The live test dashboard (6.5).
@@ -141,29 +134,25 @@ function PeerLine({ peer, suffix }: { peer: PeerView; suffix: string }) {
       ].filter(Boolean),
     ),
   ).join(`, `);
-  const { os, device } = UAParser(peer.ua);
-  const DeviceIcon =
-    device.type === "mobile"
-      ? device.vendor === "Apple"
-        ? IoPhonePortraitOutline
-        : IoPhonePortraitSharp
-      : device.type === "tablet" || peer.name.includes("Pad")
-        ? IoTabletPortraitOutline
-        : IoLaptopOutline;
-  const BrandIcon = device.vendor === "Apple"
-    ? FaApple
-    : device.vendor === "Microsoft" || os.name?.includes("Windows")
-      ? FaWindows
-      : device.vendor === "Google" || os.name?.includes("Android")
-        ? FaAndroid
-        : device.vendor === "Linux"
-          ? FaLinux
-          : FaQuestion;
+  const { DeviceIcon, BrandIcon, label } = usePeerIcon(peer);
   return (
-    <div className={`w-full flex flex-row nth-last-of-type-1:text-end nth-last-of-type-1:flex-row-reverse ${ device.type === "mobile" ? "gap-2" : "gap-3" }`}>
-      <div className="flex place-content-center place-items-center">
-        <DeviceIcon className="w-10 h-10 text-4xl inline h-4 w-4 text-gray-600 dark:text-gray-300" />
-        <BrandIcon className="absolute inline h-4 w-4 text-gray-600 dark:text-gray-300" />
+    <div
+      className={`w-full flex flex-row nth-last-of-type-1:text-end nth-last-of-type-1:flex-row-reverse ${peer.icon?.type === "mobile" ? "gap-2" : "gap-3"}`}
+    >
+      {/* The one thing on this line that would otherwise exist only in
+          pixels, so the pair is announced as a single named image. */}
+      <div
+        className="flex place-content-center place-items-center"
+        {...(label ? { role: "img", "aria-label": label } : { "aria-hidden": true })}
+      >
+        <DeviceIcon
+          aria-hidden="true"
+          className="w-10 h-10 text-4xl inline h-4 w-4 text-gray-600 dark:text-gray-300"
+        />
+        <BrandIcon
+          aria-hidden="true"
+          className="absolute inline h-4 w-4 text-gray-600 dark:text-gray-300"
+        />
       </div>
       <p className="flex flex-col text-gray-600 dark:text-gray-300">
         <span className="text-sm font-medium text-gray-900 dark:text-gray-100">
@@ -173,18 +162,14 @@ function PeerLine({ peer, suffix }: { peer: PeerView; suffix: string }) {
         <span className={peer.protocol === "IPv6" ? "text-xs" : "text-sm"}>
           {peer.ip}
         </span>
-        {peer.location && locationStr ? (
-          <span className="text-xs text-gray-500 dark:text-gray-400">
-            {locationStr}
-          </span>
-        ) : (
-          // Says exactly whose location is missing, and never guesses one.
-          <span className="text-gray-500 dark:text-gray-400">
-            {peer.profileKnown
+        <span className="text-xs text-gray-500 dark:text-gray-400">
+          {peer.location && locationStr
+            ? locationStr
+            : // Says exactly whose location is missing, and never guesses one.
+              peer.profileKnown
               ? "location not shared"
               : "location not received yet"}
-          </span>
-        )}
+        </span>
       </p>
     </div>
   );

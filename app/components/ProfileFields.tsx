@@ -12,11 +12,12 @@ const PRIVACY_COPY: Record<
 > = {
   off: {
     label: "Off",
-    description: "Share name, browser, full address, and location.",
+    description: "Share name, browser and device, full address, and location.",
   },
   on: {
     label: "On",
-    description: "Share name, full address, and location. Browser withheld.",
+    description:
+      "Share name, full address, and location. Browser and device withheld.",
   },
   anonymous: {
     label: "Anonymous",
