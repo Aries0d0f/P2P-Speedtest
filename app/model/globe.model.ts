@@ -155,6 +155,21 @@ export interface GlobeSceneOptions {
 
 export type GlobeSceneFactory = (options: GlobeSceneOptions) => Promise<GlobeScene>;
 
-/** Container width at or above Tailwind's `md`. The orientation contract keys
- * off the measured container, never a user-agent string. */
-export const DESKTOP_MIN_WIDTH = 768;
+/**
+ * Container width at or above Tailwind's `sm`, the point where the orientation
+ * contract switches from the mobile self-left/peer-right roll to a tilted
+ * Earth. Keyed off the measured container, never a user-agent string.
+ *
+ * Deliberately *below* the `max-w-3xl` (768px) cap the room puts on the
+ * dashboard column. A threshold equal to that cap is one the container can only
+ * ever meet exactly and never clear, so a desktop browser narrower than about
+ * 800px — cap plus the page's own `px-4` — silently got the mobile roll. `sm`
+ * leaves real headroom on both sides: no phone in portrait reaches it, and any
+ * window wide enough to be a desktop window clears it.
+ */
+export const DESKTOP_MIN_WIDTH = 640;
+
+/** Separate from the orientation threshold on purpose: a 640px column should
+ * get the desktop *arrangement* without also being handed a 200k-point cloud
+ * and a 4x back buffer. */
+export const HIGH_QUALITY_MIN_WIDTH = 768;

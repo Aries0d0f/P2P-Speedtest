@@ -3,6 +3,7 @@
 
 import {
   DESKTOP_MIN_WIDTH,
+  HIGH_QUALITY_MIN_WIDTH,
   type GlobeLayout,
   type QualityTier,
 } from "~/model/globe.model";
@@ -12,7 +13,7 @@ export function layoutForWidth(width: number): GlobeLayout {
 }
 
 export function qualityForWidth(width: number): QualityTier {
-  if (width >= DESKTOP_MIN_WIDTH) return "high";
+  if (width >= HIGH_QUALITY_MIN_WIDTH) return "high";
   if (width >= 480) return "medium";
   return "low";
 }

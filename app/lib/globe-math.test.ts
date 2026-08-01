@@ -364,7 +364,9 @@ describe("mobile orientation", () => {
     });
   }
 
-  it("holds a previous orientation for a shared location", () => {
+  it("faces a shared location rather than holding the previous orientation", () => {
+    // Only the roll is undetermined when both peers land on the same point;
+    // the direction to face is not, so a stale `previous` must not win.
     const same = geoPointToVector(TOKYO);
     const previous = quatFromUnitVectors(vec(0, 0, 1), vec(0, 1, 0));
     const { quat, reason } = targetOrientation({
@@ -373,14 +375,30 @@ describe("mobile orientation", () => {
       remote: same,
       previous,
     });
-    expect(reason).toBe("degenerate-hold");
-    expect(quat).toEqual(previous);
+    expect(reason).toBe("both-markers");
+    expect(quatRotate(quat, same).z).toBeCloseTo(1, 9);
+    expect(projectedNorthTiltDeg(quat)).toBeCloseTo(AXIAL_TILT_DEG, 6);
   });
 
   it("faces a shared location when there is no previous orientation", () => {
     const same = geoPointToVector(TOKYO);
     const { quat } = targetOrientation({ layout: "mobile", local: same, remote: same });
     expect(quatRotate(quat, same).z).toBeCloseTo(1, 9);
+  });
+
+  it("holds the previous orientation for a shared location at a pole", () => {
+    // North projects onto the camera axis, so there is genuinely no roll to
+    // solve for — the one case where holding is still right.
+    const same = geoPointToVector(NORTH_POLE);
+    const previous = quatFromUnitVectors(vec(0, 0, 1), vec(1, 0, 0));
+    const { quat, reason } = targetOrientation({
+      layout: "mobile",
+      local: same,
+      remote: same,
+      previous,
+    });
+    expect(reason).toBe("degenerate-hold");
+    expect(quat).toEqual(previous);
   });
 
   it("produces no NaN for a near-antipodal pair", () => {
