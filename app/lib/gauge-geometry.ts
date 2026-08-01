@@ -1,6 +1,8 @@
 /** Pure SVG geometry for the speed gauge. */
 
-export const START_ANGLE = -220; // degrees, measured clockwise from 12 o'clock
+// Degrees, measured clockwise from 12 o'clock. The scale opens at the lower
+// left and closes at the lower right, leaving the gap at the bottom.
+export const START_ANGLE = -130;
 export const SWEEP = 260;
 export const RADIUS = 54;
 export const CENTER = 64;
