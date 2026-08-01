@@ -90,7 +90,15 @@ function ResultRow({
 
       <div className="flex flex-wrap gap-x-3 text-xs text-gray-500 dark:text-gray-400">
         {data.peers.map((p) => (
-          <span key={p.id}>{p.name}</span>
+          <span key={p.id}>
+            {p.name}
+            {" "}
+            {p.ip || "IP Unknown"}
+            {" "}
+            {p.geo?.proxy && "proxy"}
+            {p.geo?.hosting && "hosting"}
+            {p.geo?.mobile && "cellular"}
+          </span>
         ))}
       </div>
 
