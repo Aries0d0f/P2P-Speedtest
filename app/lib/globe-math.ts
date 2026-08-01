@@ -370,12 +370,13 @@ export function targetOrientation(input: OrientationInput): OrientationResult {
   const dy = rp.y - lp.y;
   if (Math.hypot(dx, dy) < DEGENERATE_PROJECTION) {
     // The two markers project onto (nearly) the same screen point — a shared
-    // location. There is no left/right to establish, so hold the previous
-    // stable orientation, or just face the pair if there isn't one.
-    return {
-      quat: previous ?? face,
-      reason: previous ? "degenerate-hold" : "both-markers",
-    };
+    // location. Only the *roll* is undetermined here; where to point the globe
+    // is not, so fall back to the desktop rule and face the shared point at
+    // Earth's tilt. Holding `previous` would leave the globe wherever it
+    // happened to be — on a fresh scene, the default orientation, with the
+    // pair off screen entirely.
+    const tilted = applyTilt(face, previous);
+    return { quat: tilted.quat, reason: tilted.held ? "degenerate-hold" : "both-markers" };
   }
   return { quat: rollAboutCamera(face, -Math.atan2(dy, dx)), reason: "both-markers" };
 }

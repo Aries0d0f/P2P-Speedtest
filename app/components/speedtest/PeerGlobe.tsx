@@ -121,7 +121,7 @@ export function PeerGlobe({
         ref={placeholderRef}
         data-testid="peer-globe"
         aria-hidden="true"
-        className="pointer-events-none aspect-square w-full sm:aspect-[4/3]"
+        className="pointer-events-none aspect-square w-full"
       />
 
       {/* `pointer-events-none` keeps the layer from swallowing a click meant

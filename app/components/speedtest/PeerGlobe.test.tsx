@@ -359,8 +359,23 @@ describe("PeerGlobe — layout and lifecycle signals", () => {
     const presentation = presentationFor();
     expect(buildFrame(presentation, 900, false, null).layout).toBe("desktop");
     expect(buildFrame(presentation, 420, false, null).layout).toBe("mobile");
-    expect(buildFrame(presentation, 768, false, null).layout).toBe("desktop");
-    expect(buildFrame(presentation, 767, false, null).layout).toBe("mobile");
+    expect(buildFrame(presentation, 640, false, null).layout).toBe("desktop");
+    expect(buildFrame(presentation, 639, false, null).layout).toBe("mobile");
+  });
+
+  it("gives a narrow desktop window the desktop orientation", () => {
+    // The room caps the dashboard at `max-w-3xl` inside a `px-4` main, so the
+    // container is `min(viewport - 32, 768)`. The threshold has to sit far
+    // enough below that cap for a sub-800px window to still read as desktop.
+    const presentation = presentationFor();
+    const container = (viewport: number) => Math.min(viewport - 32, 768);
+    for (const viewport of [1440, 900, 790, 700]) {
+      expect(buildFrame(presentation, container(viewport), false, null).layout).toBe("desktop");
+    }
+    // A phone stays on the self-left/peer-right contract.
+    for (const viewport of [430, 390, 320]) {
+      expect(buildFrame(presentation, container(viewport), false, null).layout).toBe("mobile");
+    }
   });
 
   it("passes reduced motion through to the frame", () => {
