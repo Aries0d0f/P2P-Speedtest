@@ -352,8 +352,28 @@ without asking anyone. `protocol` follows from its family.
 - With no srflx candidate (STUN blocked, or a LAN-only pairing), fall back
   to the host candidate in use — on a same-network test that *is* the
   address the peers used.
-- With neither, omit `ip` and `protocol`. The schema allows their absence
-  precisely because no server supplies them.
+- With neither *and* no prefetched address (below), omit `ip` and
+  `protocol`. The schema allows their absence precisely because no server
+  supplies them.
+
+**Prefetch the address on the same schedule as geo.** ICE candidates are
+gathered asynchronously, and at channel-open time the srflx one is sometimes
+not there yet — which made `ip` reach the peer only sometimes. The geo
+endpoint answers with `{ ip, protocol, geo }`, so the address arrives with
+the lookup already being made at mount, and stands in wherever ICE has
+nothing yet.
+
+- ICE wins whenever it has a complete address: it describes the path the
+  connection actually took.
+- Never merge the two field-by-field. They can disagree on family (STUN over
+  IPv4 while HTTP went IPv6), and one source's `ip` beside the other's
+  `protocol` is a false pair.
+- The initial profile *peeks* at the prefetch rather than awaiting it — that
+  message gates pairing. The enrichment awaits, so it is the send that
+  actually guarantees an address, and an `ip` is absent there only when both
+  sources had nothing.
+- This is not a new disclosure: the same endpoint already saw this address by
+  answering the geo lookup at all.
 
 **Geo**, in parallel with ICE and never gating it: fetch
 `https://ip.aries0d0f.me/?q=geo`, whose fields map directly to the schema's
@@ -533,6 +553,9 @@ would lose the useful signal that the two peers are on different networks.
 - [ ] A peer determines its own `ip` from its srflx candidate, not the
       selected pair — confirmed by a forced-relay run reporting the peer's
       own address rather than the TURN server's.
+- [ ] A run where ICE has gathered no usable candidate by channel-open time
+      still reports an `ip`, taken from the prefetched lookup — sent by the
+      enrichment message if it missed the initial one.
 - [ ] A hostile `peer-profile` (over-long `name`, control characters,
       unknown `geo` keys, malformed `ip`) is sanitised by the receiving peer
       and cannot reach a stored record intact.
