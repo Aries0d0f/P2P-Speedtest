@@ -1,3 +1,4 @@
+import { Fragment } from "react";
 import { useSpeedSeries } from "~/hooks/speed-series.hook";
 import {
   FaShieldHalved,
@@ -335,7 +336,7 @@ function PeerDetails({
                 {networkTypeAnnotations
                   .filter((a) => a.present(localPeer))
                   .map((a, index, { length }) => (
-                    <>
+                    <Fragment key={a.name}>
                       <span
                         key={a.name}
                         className="flex flex-row gap-1 place-items-center"
@@ -348,7 +349,7 @@ function PeerDetails({
                           ·
                         </span>
                       )}
-                    </>
+                    </Fragment>
                   ))}
               </p>
             )}
@@ -360,7 +361,7 @@ function PeerDetails({
                 {networkTypeAnnotations
                   .filter((a) => a.present(remotePeer))
                   .map((a, index, { length }) => (
-                    <>
+                    <Fragment key={a.name}>
                       <span
                         key={a.name}
                         className="flex flex-row gap-1 place-items-center"
@@ -373,14 +374,14 @@ function PeerDetails({
                           ·
                         </span>
                       )}
-                    </>
+                    </Fragment>
                   ))}
               </p>
             )}
           </div>
         )}
         {dataFields.map(({ label, data, className }) => (
-          <div className="flex flex-row gap-3 place-content-between text-xs text-gray-500 dark:text-gray-400">
+          <div className="flex flex-row gap-3 place-content-between text-xs text-gray-500 dark:text-gray-400" key={label}>
             <label className="min-w-[6rem] sm:text-center sm:hidden font-medium whitespace-nowrap">{label}</label>
             {localPeer && (
               <p className={`w-full text-right sm:text-left ${className}`}>{data(localPeer) || "-"}</p>
