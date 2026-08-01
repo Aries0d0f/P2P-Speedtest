@@ -8,6 +8,9 @@ import { toGeoPoint } from "~/model/geo.model";
 import type { LiveTestRoomView } from "~/model/presentation.model";
 
 const RUN = "run-1";
+// What an iPad sends too: iPadOS Safari identifies itself as a Macintosh.
+const MAC_UA =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15";
 
 function snapshot(
   stageId: StageId,
@@ -491,10 +494,41 @@ describe("purity and input surface", () => {
 
   it("omits a withheld field rather than emitting it as undefined", () => {
     const p = selectLiveTestPresentation(view({ otherProfile: { name: "Anon" } }), 0);
-    for (const key of ["ua", "ip", "protocol", "geo"]) {
+    for (const key of ["ua", "device", "ip", "protocol", "geo"]) {
       expect(p.remotePeer).not.toHaveProperty(key);
     }
     expect(p.remotePeer.location).toBeNull();
+  });
+
+  it("draws a peer from the device it sent, in preference to its UA", () => {
+    // A reduced UA cannot tell an iPad from a Mac; the sender can, and said so.
+    const p = selectLiveTestPresentation(
+      view({
+        otherProfile: {
+          name: "Remote",
+          ua: MAC_UA,
+          device: { type: "tablet", brand: "apple" },
+        },
+      }),
+      0,
+    );
+    expect(p.remotePeer.icon).toEqual({ type: "tablet", brand: "apple" });
+  });
+
+  it("falls back to the UA for a peer that sent no device", () => {
+    // An older peer, or a stored result — which keeps `ua` but not the
+    // descriptor.
+    const p = selectLiveTestPresentation(view({ otherProfile: { name: "Remote", ua: MAC_UA } }), 0);
+    expect(p.remotePeer.icon).toEqual({ type: "desktop", brand: "apple" });
+  });
+
+  it("draws nothing for a peer that shared neither, rather than this browser", () => {
+    // The failure this rules out is showing the reader their own device as
+    // the peer's, which is what a UA parser answers when given nothing.
+    const p = selectLiveTestPresentation(view({ otherProfile: { name: "Anon" } }), 0);
+    expect(p.remotePeer.icon).toBeNull();
+    // Same for a peer whose profile has not arrived at all.
+    expect(selectLiveTestPresentation(view({ otherProfile: null }), 0).remotePeer.icon).toBeNull();
   });
 
   it("emits no field outside the peer view's declared set", () => {
@@ -507,7 +541,9 @@ describe("purity and input surface", () => {
       }),
       0,
     );
-    const allowed = ["slot", "name", "ua", "ip", "protocol", "geo", "location", "profileKnown"];
+    const allowed = [
+      "slot", "name", "ua", "device", "ip", "protocol", "geo", "location", "icon", "profileKnown",
+    ];
     for (const peer of [p.localPeer, p.remotePeer]) {
       expect(Object.keys(peer).filter((k) => !allowed.includes(k))).toEqual([]);
     }

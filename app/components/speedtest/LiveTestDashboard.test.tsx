@@ -15,6 +15,13 @@ const RUN = "run-1";
 // coordinates — the marker keys off lat/lon, the text equivalent off the names.
 const TOKYO = { lat: 35.6762, lon: 139.6503, city: "Tokyo", country: "Japan" };
 const BERLIN = { lat: 52.52, lon: 13.405, city: "Berlin", country: "Germany" };
+// What an iPad sends too: iPadOS Safari identifies itself as a Macintosh.
+const MAC_UA =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15";
+const WINDOWS_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+const UBUNTU_UA =
+  "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0";
 
 /** The globe is exercised in `PeerGlobe.test.tsx`; here it is a stub so the
  * dashboard's own composition and semantics are what is under test. */
@@ -71,6 +78,39 @@ describe("LiveTestDashboard — semantics without the canvas", () => {
     expect(region.textContent).toContain("Tokyo, Japan");
     expect(region.textContent).toContain("Grace");
     expect(region.textContent).toContain("Berlin, Germany");
+  });
+
+  it("names each peer's device from what that peer shared", async () => {
+    await renderDashboard(
+      presentationFor({
+        selfProfile: { name: "Ada", geo: TOKYO, ua: MAC_UA, device: { type: "tablet", brand: "apple" } },
+        otherProfile: { name: "Grace", geo: BERLIN, ua: WINDOWS_UA },
+      }),
+    );
+    const region = screen.getByRole("region", { name: "Peers and locations" });
+    // Ada said "iPad" outright; Grace said nothing but a UA, which is enough
+    // to read a Windows desktop off.
+    expect(within(region).getByRole("img", { name: "Apple tablet" })).toBeInTheDocument();
+    expect(within(region).getByRole("img", { name: "Windows computer" })).toBeInTheDocument();
+  });
+
+  it("names a Linux peer by its distribution", async () => {
+    await renderDashboard(
+      presentationFor({ otherProfile: { name: "Grace", geo: BERLIN, ua: UBUNTU_UA } }),
+    );
+    const region = screen.getByRole("region", { name: "Peers and locations" });
+    expect(within(region).getByRole("img", { name: "Ubuntu computer" })).toBeInTheDocument();
+  });
+
+  it("names no device for a peer that shared neither one nor a UA", async () => {
+    await renderDashboard(
+      presentationFor({ otherProfile: { name: "Grace", geo: BERLIN } }),
+    );
+    // Privacy On withholds the UA, so there is nothing to announce — and in
+    // particular not the reader's own device, which is what a UA parser
+    // handed nothing would answer.
+    const region = screen.getByRole("region", { name: "Peers and locations" });
+    expect(within(region).queryAllByRole("img")).toHaveLength(0);
   });
 
   it("says exactly whose location is unavailable", async () => {
