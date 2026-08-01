@@ -10,6 +10,7 @@
 import { toGeoPoint } from "~/model/geo.model";
 import type { Slot } from "~/model/signaling.model";
 import type { Latency, StageProgress } from "~/model/measurement.model";
+import { guessDevice } from "./peer-profile";
 import { fallbackPeerName, type PeerProfile } from "~/model/peer.model";
 import {
   DUPLEX,
@@ -39,14 +40,20 @@ export function tokenForRole(mode: TransferMode, role: "receive" | "send"): Tran
 /** A withheld field is omitted rather than set to `undefined`, so "absent"
  * reads the same here as it does on the wire and in a stored result. */
 function toPeerView(slot: Slot, profile: PeerProfile | null): PeerView {
+  const name = profile?.name?.trim() || fallbackPeerName(slot);
   return {
     slot,
-    name: profile?.name?.trim() || fallbackPeerName(slot),
+    name,
     ...(profile?.ua ? { ua: profile.ua } : {}),
+    ...(profile?.device ? { device: profile.device } : {}),
     ...(profile?.ip ? { ip: profile.ip } : {}),
     ...(profile?.protocol ? { protocol: profile.protocol } : {}),
     ...(profile?.geo ? { geo: profile.geo } : {}),
     location: toGeoPoint(profile?.geo),
+    // What the peer said about itself beats what its UA can be made to admit:
+    // a reduced UA cannot tell an iPad from a Mac, and a stored result keeps
+    // the UA but not the descriptor, so both paths have to work.
+    icon: profile?.device ?? guessDevice(profile?.ua, name),
     profileKnown: profile !== null,
   };
 }
