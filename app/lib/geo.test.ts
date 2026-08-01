@@ -1,10 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { projectGeoForAnonymous, sanitizeGeo } from "~/model/geo.model";
-import { fetchGeo, prefetchGeo, resetGeoPrefetch } from "./geo";
+import { resolveOwnAddress } from "~/model/connection.model";
+import {
+  fetchSelfLookup,
+  peekSelfAddress,
+  prefetchSelfLookup,
+  resetSelfLookupPrefetch,
+} from "./geo";
 
 beforeEach(() => {
-  resetGeoPrefetch();
+  resetSelfLookupPrefetch();
 });
+
+/** The lookup's geo half, which most of these cases are about. */
+async function fetchGeo() {
+  return (await fetchSelfLookup())?.geo ?? null;
+}
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -16,7 +27,7 @@ function respondWith(body: unknown, status = 200) {
   return fetchMock;
 }
 
-describe("fetchGeo", () => {
+describe("fetchSelfLookup", () => {
   it("fetches from the geo proxy and sanitizes the response", async () => {
     const fetchMock = vi.fn(async (url: string | URL) => {
       expect(String(url)).toBe("https://ip.aries0d0f.me/?q=geo");
@@ -96,6 +107,30 @@ describe("fetchGeo", () => {
     );
     expect(await fetchGeo()).toBeNull();
   });
+
+  it("reads the envelope's address, so an `ip` is in hand before ICE has one", async () => {
+    respondWith({ ip: "1.161.11.102", protocol: "IPv4", geo: { city: "New Taipei City" } });
+    expect((await fetchSelfLookup())?.address).toEqual({
+      ip: "1.161.11.102",
+      protocol: "IPv4",
+    });
+  });
+
+  it("infers the family when the envelope omits `protocol`", async () => {
+    respondWith({ ip: "2001:b011:3804::d0f" });
+    expect((await fetchSelfLookup())?.address).toEqual({
+      ip: "2001:b011:3804::d0f",
+      protocol: "IPv6",
+    });
+  });
+
+  it("drops an address that isn't a valid IP — this is a network response", async () => {
+    respondWith({ ip: "<script>", protocol: "IPv4", geo: { city: "New Taipei City" } });
+    const lookup = await fetchSelfLookup();
+    expect(lookup?.address).toEqual({});
+    // …and the geo half still survives on its own.
+    expect(lookup?.geo).toEqual({ city: "New Taipei City" });
+  });
 });
 
 describe("sanitizeGeo", () => {
@@ -136,21 +171,29 @@ describe("projectGeoForAnonymous", () => {
   });
 });
 
-describe("prefetchGeo", () => {
-  const PAYLOAD = { geo: { city: "New Taipei City", lat: 25.0693, lon: 121.4626 } };
+describe("prefetchSelfLookup", () => {
+  const PAYLOAD = {
+    ip: "1.161.11.102",
+    protocol: "IPv4",
+    geo: { city: "New Taipei City", lat: 25.0693, lon: 121.4626 },
+  };
 
   it("looks up once and shares the answer with every later caller", async () => {
     const fetchMock = respondWith(PAYLOAD);
 
     // The room page starts this at mount; the control channel awaits it later.
-    const [atMount, atChannelOpen] = await Promise.all([prefetchGeo(), prefetchGeo()]);
+    const [atMount, atChannelOpen] = await Promise.all([
+      prefetchSelfLookup(),
+      prefetchSelfLookup(),
+    ]);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(atMount).toEqual(atChannelOpen);
-    expect(atMount?.lat).toBe(25.0693);
+    expect(atMount.geo?.lat).toBe(25.0693);
+    expect(atMount.address.ip).toBe("1.161.11.102");
 
     // And a caller arriving after it has already settled still pays nothing.
-    expect(await prefetchGeo()).toEqual(atMount);
+    expect(await prefetchSelfLookup()).toEqual(atMount);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
@@ -164,19 +207,51 @@ describe("prefetchGeo", () => {
         throw new Error("offline");
       }),
     );
-    expect(await prefetchGeo()).toBeNull();
+    expect(await prefetchSelfLookup()).toEqual({ address: {}, geo: null });
 
     const fetchMock = respondWith(PAYLOAD);
-    expect((await prefetchGeo())?.lat).toBe(25.0693);
+    expect((await prefetchSelfLookup()).geo?.lat).toBe(25.0693);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("shares nothing on its own — the caller still projects by privacy level", async () => {
     respondWith(PAYLOAD);
-    const geo = await prefetchGeo();
+    const { geo } = await prefetchSelfLookup();
     // Full coordinates sit in the module; Anonymous still gets nothing from
     // them, because the projection happens where the message is built.
     expect(geo?.lat).toBe(25.0693);
     expect(projectGeoForAnonymous(geo)).toBeUndefined();
+  });
+});
+
+describe("peekSelfAddress", () => {
+  const PAYLOAD = { ip: "1.161.11.102", protocol: "IPv4", geo: { city: "New Taipei City" } };
+
+  it("answers empty until the prefetch lands, then answers with it", async () => {
+    respondWith(PAYLOAD);
+    // The initial profile may consult the prefetch but must never wait on it:
+    // it gates pairing.
+    const pending = prefetchSelfLookup();
+    expect(peekSelfAddress()).toEqual({});
+
+    await pending;
+    expect(peekSelfAddress()).toEqual({ ip: "1.161.11.102", protocol: "IPv4" });
+  });
+
+  it("stands in for an ICE address that hasn't gathered yet", async () => {
+    respondWith(PAYLOAD);
+    await prefetchSelfLookup();
+
+    // No srflx candidate at channel-open time — the case where `ip` used to go
+    // missing from the profile entirely.
+    expect(resolveOwnAddress({}, peekSelfAddress())).toEqual({
+      ip: "1.161.11.102",
+      protocol: "IPv4",
+    });
+
+    // Once ICE has an answer it wins: it describes the path actually used.
+    expect(
+      resolveOwnAddress({ ip: "203.0.113.7", protocol: "IPv4" }, peekSelfAddress()),
+    ).toEqual({ ip: "203.0.113.7", protocol: "IPv4" });
   });
 });
