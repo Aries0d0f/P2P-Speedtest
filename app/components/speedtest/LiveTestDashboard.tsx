@@ -1,5 +1,14 @@
 import { useSpeedSeries } from "~/hooks/speed-series.hook";
-import { BsArrows } from "react-icons/bs";
+import {
+  FaShieldHalved,
+  FaServer,
+  FaSignal,
+  FaSpinner,
+  FaArrowLeftLong,
+  FaArrowRightLong,
+  FaArrowRightArrowLeft,
+} from "react-icons/fa6";
+import { BsThreeDots, BsArrows } from "react-icons/bs";
 import type {
   LiveTestPresentation,
   PeerView,
@@ -11,6 +20,8 @@ import { SpeedGauge } from "./SpeedGauge";
 import type { GlobeSceneFactory } from "~/model/globe.model";
 import { usePeerIcon } from "~/hooks/peer-icon.hook";
 import { usePrefersReducedMotion } from "~/hooks/reduced-motion.hook";
+import { ConnectionBadge } from "../ConnectionBadge";
+import { useState } from "react";
 
 /**
  * The live test dashboard (6.5).
@@ -60,7 +71,7 @@ export default function LiveTestDashboard({
         onVisualError={onVisualError}
       />
 
-      <PeerLocations presentation={presentation} />
+      <PeerPresentation presentation={presentation} />
       <StageAnnouncement presentation={presentation} />
 
       {(showGraph || showGauge) && (
@@ -87,43 +98,69 @@ export default function LiveTestDashboard({
  * The text equivalent of the markers and the route. Present whether or not
  * the canvas rendered, which is what lets the canvas be `aria-hidden`.
  */
-function PeerLocations({
+function PeerPresentation({
   presentation,
 }: {
   presentation: LiveTestPresentation;
 }) {
-  const { localPeer, remotePeer, channels } = presentation;
+  const [showPeerDetails, setShowPeerDetails] = useState(false);
+  const { localPeer, remotePeer, phase, stageName, connectionType } =
+    presentation;
+  const iconClassName =
+    "shrink-0 text-lg text-gray-600 dark:text-gray-300 shrink-0 py-1 sm:py-0 h-8 sm:h-auto w-10 sm:w-auto rotate-90 sm:rotate-0";
   return (
     <section
-      aria-label="Peers and locations"
-      className="surface-panel flex flex-col gap-1 rounded-xl border border-gray-200 px-4 py-3 dark:border-gray-700"
+      aria-label="Peers"
+      className="reactive flex flex-col place-items-center"
     >
-      <div className="flex flex-row gap-1 place-content-between place-items-center">
-        <PeerLine peer={localPeer} suffix=" (You)" />
-        <BsArrows className="shrink-0 text-lg text-gray-600 dark:text-gray-300" />
-        <PeerLine peer={remotePeer} suffix="" />
+      <ConnectionBadge type={connectionType} variant="legend" />
+      <div className="w-full surface-panel rounded-xl border border-gray-200 pt-6 sm:pt-4 px-4 py-3 dark:border-gray-700 flex flex-col gap-3 sm:gap-2">
+        <div
+          onClick={() => setShowPeerDetails((prev) => !prev)}
+          className="flex sm:flex-row flex-col gap-2 sm:gap-4 sm:place-content-between place-content-start sm:place-items-center"
+        >
+          <PeerLine peer={localPeer} suffix=" (You)" type="local" />
+          {["waiting", "pairing", "finalizing"].includes(phase) ? (
+            <>
+              <BsThreeDots className={iconClassName} />
+              <PeerLinePlaceholder />
+            </>
+          ) : (
+            <>
+              {phase === "testing" ? (
+                stageName === "duplex" ? (
+                  <FaArrowRightArrowLeft className={iconClassName} />
+                ) : stageName === "download" ? (
+                  <FaArrowLeftLong className={iconClassName} />
+                ) : stageName === "upload" ? (
+                  <FaArrowRightLong className={iconClassName} />
+                ) : null
+              ) : (
+                <BsArrows className={iconClassName} />
+              )}
+              <PeerLine peer={remotePeer} suffix="" type="remote" />
+            </>
+          )}
+        </div>
+        {showPeerDetails && (
+          <PeerDetails localPeer={localPeer} remotePeer={remotePeer} />
+        )}
       </div>
-      {channels.map((channel) => {
-        const from =
-          channel.senderSlot === localPeer.slot
-            ? localPeer.name
-            : remotePeer.name;
-        const to =
-          channel.receiverSlot === localPeer.slot
-            ? localPeer.name
-            : remotePeer.name;
-        return (
-          <p key={channel.key} className="text-gray-600 dark:text-gray-300">
-            {/* Direction spelled out, not only drawn. */}
-            {from} → {to} ({channel.label.toLowerCase()})
-          </p>
-        );
-      })}
     </section>
   );
 }
 
-function PeerLine({ peer, suffix }: { peer: PeerView; suffix: string }) {
+function PeerLine({
+  peer,
+  suffix,
+  type,
+}: {
+  peer: PeerView;
+  suffix: string;
+  type: "local" | "remote";
+}) {
+  const [showPeerDetails, setShowPeerDetails] = useState(false);
+
   const locationStr = Array.from(
     new Set(
       [
@@ -136,42 +173,228 @@ function PeerLine({ peer, suffix }: { peer: PeerView; suffix: string }) {
   ).join(`, `);
   const { DeviceIcon, BrandIcon, label } = usePeerIcon(peer);
   return (
-    <div
-      className={`w-full flex flex-row nth-last-of-type-1:text-end nth-last-of-type-1:flex-row-reverse ${peer.icon?.type === "mobile" ? "gap-2" : "gap-3"}`}
+    <>
+      <aside
+        onClick={() => setShowPeerDetails((prev) => !prev)}
+        className={`w-full flex flex-row sm:nth-last-of-type-1:text-end sm:nth-last-of-type-1:flex-row-reverse sm:nth-last-of-type-1:[&>div>h3]:flex-row-reverse ${peer.icon?.type === "mobile" ? "gap-2" : "gap-3"}`}
+      >
+        <div
+          className="flex place-content-center place-items-center"
+          {...(label
+            ? { role: "img", "aria-label": label }
+            : { "aria-hidden": true })}
+        >
+          <DeviceIcon
+            aria-hidden="true"
+            className="w-10 h-10 text-4xl inline h-4 w-4 text-gray-600 dark:text-gray-300"
+          />
+          <BrandIcon
+            aria-hidden="true"
+            className="absolute inline h-4 w-4 text-gray-600 dark:text-gray-300"
+          />
+        </div>
+        <div className="flex flex-col gap-0.25 place-content-center">
+          <h3 className="flex flex-row place-items-center gap-1">
+            <span className="text-sm font-medium text-gray-900 dark:text-gray-100">
+              {peer.name}
+              {suffix}
+            </span>
+            <span className="text-xs">
+              {peer.geo?.proxy && <FaShieldHalved />}
+              {peer.geo?.hosting && <FaServer />}
+              {peer.geo?.mobile && <FaSignal />}
+            </span>
+          </h3>
+          <p className="flex flex-col text-gray-600 dark:text-gray-300">
+            <span
+              className={
+                peer.protocol === "IPv6" ? "text-xs/4.25" : "text-sm/4"
+              }
+            >
+              {peer.ip || "-"}
+            </span>
+            <span className="text-xs text-gray-500 dark:text-gray-400">
+              {peer.location && locationStr
+                ? locationStr
+                : // Says exactly whose location is missing, and never guesses one.
+                  peer.profileKnown
+                  ? "location not shared"
+                  : "location not received yet"}
+            </span>
+          </p>
+        </div>
+      </aside>
+      {type === "local" && showPeerDetails && (
+        <PeerDetails localPeer={peer} variant="compact-local" />
+      )}
+      {type === "remote" && showPeerDetails && (
+        <PeerDetails remotePeer={peer} variant="compact-remote" />
+      )}
+    </>
+  );
+}
+
+function PeerLinePlaceholder() {
+  return (
+    <aside
+      className={`w-full flex flex-row nth-last-of-type-1:text-end nth-last-of-type-1:flex-row-reverse nth-last-of-type-1:[&>div>h3]:flex-row-reverse`}
     >
       {/* The one thing on this line that would otherwise exist only in
           pixels, so the pair is announced as a single named image. */}
       <div
         className="flex place-content-center place-items-center"
-        {...(label ? { role: "img", "aria-label": label } : { "aria-hidden": true })}
+        role="img"
+        aria-label="Unknown peer"
+        aria-hidden="true"
       >
-        <DeviceIcon
-          aria-hidden="true"
-          className="w-10 h-10 text-4xl inline h-4 w-4 text-gray-600 dark:text-gray-300"
-        />
-        <BrandIcon
-          aria-hidden="true"
-          className="absolute inline h-4 w-4 text-gray-600 dark:text-gray-300"
-        />
+        <FaSpinner className="animate-spin-step w-10 h-10 p-2 text-4xl inline h-4 w-4 text-gray-600 dark:text-gray-300" />
       </div>
-      <p className="flex flex-col text-gray-600 dark:text-gray-300">
-        <span className="text-sm font-medium text-gray-900 dark:text-gray-100">
-          {peer.name}
-          {suffix}
-        </span>
-        <span className={peer.protocol === "IPv6" ? "text-xs" : "text-sm"}>
-          {peer.ip}
-        </span>
-        <span className="text-xs text-gray-500 dark:text-gray-400">
-          {peer.location && locationStr
-            ? locationStr
-            : // Says exactly whose location is missing, and never guesses one.
-              peer.profileKnown
-              ? "location not shared"
-              : "location not received yet"}
-        </span>
-      </p>
-    </div>
+      <div className="flex flex-col gap-0.25 place-content-center">
+        <h3 className="flex flex-row place-items-center gap-1">
+          <i className="text-sm font-medium text-gray-600 dark:text-gray-400">
+            Waiting for peer...
+          </i>
+        </h3>
+      </div>
+    </aside>
+  );
+}
+
+function PeerDetails({
+  localPeer,
+  remotePeer,
+  variant = "full",
+}:
+  | {
+      localPeer: PeerView;
+      remotePeer: PeerView;
+      variant?: "full";
+    }
+  | {
+      localPeer: PeerView;
+      remotePeer?: PeerView;
+      variant: "compact-local";
+    }
+  | {
+      localPeer?: PeerView;
+      remotePeer: PeerView;
+      variant: "compact-remote";
+    }) {
+  const [showPeerDetails, setShowPeerDetails] = useState(false);
+  const networkTypeAnnotations = [
+    {
+      name: "Proxy/VPN",
+      icon: <FaShieldHalved />,
+      present: (peer: PeerView) => peer.geo?.proxy,
+    },
+    {
+      name: "Hosting",
+      icon: <FaServer />,
+      present: (peer: PeerView) => peer.geo?.hosting,
+    },
+    {
+      name: "Cellular",
+      icon: <FaSignal />,
+      present: (peer: PeerView) => peer.geo?.mobile,
+    },
+  ];
+  const showNetworkTypeAnnotations = networkTypeAnnotations.filter(
+    (a) =>
+      (localPeer && a.present(localPeer)) ||
+      (remotePeer && a.present(remotePeer)),
+  );
+  const dataFields = [
+    {
+      label: "ISP",
+      data: (peer: PeerView) =>
+        peer.geo && [peer.geo.isp, peer.geo.org].filter(Boolean).join(" · "),
+      className: "text-tiny",
+    },
+    {
+      label: "User Agent",
+      data: (peer: PeerView) => peer.ua,
+      className: "text-tiny",
+    },
+  ];
+
+  return (
+    <>
+      <hr
+        className={`${variant === "full" ? "hidden sm:block" : "sm:hidden block"} border-t border-t-gray-200 dark:border-t-gray-700`}
+      />
+      <div
+        className={`${variant === "full" ? "hidden sm:flex" : "sm:hidden flex"} flex-col gap-1.5 pt-1`}
+      >
+        {showNetworkTypeAnnotations.length > 0 && (
+          <div className="flex flex-row gap-3 place-content-between text-xs text-gray-500 dark:text-gray-400">
+            <label className="min-w-[6rem] sm:text-center sm:hidden font-medium whitespace-nowrap">
+              Network Type
+            </label>
+            {localPeer && (
+              <p className="flex flex-row gap-1 w-full empty:before:content-['-'] place-content-end sm:place-content-start">
+                {networkTypeAnnotations
+                  .filter((a) => a.present(localPeer))
+                  .map((a, index, { length }) => (
+                    <>
+                      <span
+                        key={a.name}
+                        className="flex flex-row gap-1 place-items-center"
+                      >
+                        {a.icon}
+                        {a.name}
+                      </span>
+                      {index < length - 1 && (
+                        <span className="text-gray-400 dark:text-gray-600">
+                          ·
+                        </span>
+                      )}
+                    </>
+                  ))}
+              </p>
+            )}
+            <label className="min-w-[6rem] sm:text-center hidden sm:block font-medium whitespace-nowrap">
+              Network Type
+            </label>
+            {remotePeer && (
+              <p className="flex flex-row gap-1 w-full empty:before:content-['-'] place-content-end">
+                {networkTypeAnnotations
+                  .filter((a) => a.present(remotePeer))
+                  .map((a, index, { length }) => (
+                    <>
+                      <span
+                        key={a.name}
+                        className="flex flex-row gap-1 place-items-center"
+                      >
+                        {a.icon}
+                        {a.name}
+                      </span>
+                      {index < length - 1 && (
+                        <span className="text-gray-400 dark:text-gray-600">
+                          ·
+                        </span>
+                      )}
+                    </>
+                  ))}
+              </p>
+            )}
+          </div>
+        )}
+        {dataFields.map(({ label, data, className }) => (
+          <div className="flex flex-row gap-3 place-content-between text-xs text-gray-500 dark:text-gray-400">
+            <label className="min-w-[6rem] sm:text-center sm:hidden font-medium whitespace-nowrap">{label}</label>
+            {localPeer && (
+              <p className={`w-full text-right sm:text-left ${className}`}>{data(localPeer) || "-"}</p>
+            )}
+            <label className="min-w-[6rem] sm:text-center hidden sm:block font-medium whitespace-nowrap">{label}</label>
+            {remotePeer && (
+              <p className={`w-full text-right ${className}`}>
+                {data(remotePeer) || "-"}
+              </p>
+            )}
+          </div>
+        ))}
+      </div>
+    </>
   );
 }
 

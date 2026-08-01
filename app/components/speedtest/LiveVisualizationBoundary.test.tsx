@@ -22,7 +22,7 @@ let cancelled = 0;
 function CoreTestPanel() {
   return (
     <section data-testid="core-panel">
-      <p data-testid="connection-badge">Direct connection</p>
+      <p data-testid="connection-badge">Direct Connection</p>
       <p data-testid="stage-status">Measuring download…</p>
       <p data-testid="metric-rtt">RTT 24 ms · jitter 1.4 ms</p>
       <p data-testid="metric-speed">You receiving: 94.2 Mbps · loss 0.0%</p>
