@@ -30,12 +30,16 @@ export function useGeoPrefetch(
   useEffect(() => {
     if (!profile) return;
     let cancelled = false;
-    void prefetchGeo().then((geo) => {
-      if (cancelled || !geo) return;
-      // No address yet — there is no peer connection to read one from — but
-      // the privacy projection is the same one the wire message uses.
-      onProvisionalSelfProfile(buildEnrichmentProfileMessage(profile, userAgent, {}, geo));
-    });
+    void prefetchGeo()
+      .then(async (geo) => {
+        if (cancelled || !geo) return;
+        // No address yet — there is no peer connection to read one from — but
+        // the privacy projection is the same one the wire message uses.
+        const provisional = await buildEnrichmentProfileMessage(profile, userAgent, {}, geo);
+        if (cancelled) return;
+        onProvisionalSelfProfile(provisional);
+      })
+      .catch((err) => console.warn("provisional self profile failed", err));
     return () => {
       cancelled = true;
     };

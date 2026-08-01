@@ -81,7 +81,13 @@ export function usePeerProfileExchange(
       const address = await o.getOwnAddress();
       if (ctx.current.terminal || ctx.current.runId !== runId) return;
 
-      const initial = buildInitialProfileMessage(ctx.current.profile, o.userAgent, address, self.slot);
+      const initial = await buildInitialProfileMessage(
+        ctx.current.profile,
+        o.userAgent,
+        address,
+        self.slot,
+      );
+      if (ctx.current.terminal || ctx.current.runId !== runId) return;
       ctx.current.selfProfile = initial;
       o.onSelfProfile(initial);
       if (initial.timestamp) o.onRunTimestamp(initial.timestamp); // slot 0 only (S6)
@@ -104,12 +110,13 @@ export function usePeerProfileExchange(
         if (ctx.current.terminal || ctx.current.runId !== runId) return;
         const freshAddress = await o.getOwnAddress();
         if (ctx.current.terminal || ctx.current.runId !== runId) return;
-        const enrichment = buildEnrichmentProfileMessage(
+        const enrichment = await buildEnrichmentProfileMessage(
           ctx.current.profile,
           o.userAgent,
           freshAddress,
           geo,
         );
+        if (ctx.current.terminal || ctx.current.runId !== runId) return;
         ctx.current.selfProfile = enrichment;
         o.onSelfProfile(enrichment);
         channel.send(encodeControlMessage({ type: "peer-profile", runId, payload: enrichment }));
