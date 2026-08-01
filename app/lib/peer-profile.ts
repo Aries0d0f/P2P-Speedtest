@@ -9,7 +9,7 @@
 
 import { UAParser } from "ua-parser-js";
 import { projectGeoForAnonymous, sanitizeGeo, type GeoInfo } from "~/model/geo.model";
-import type { OwnAddress } from "~/model/connection.model";
+import { isCompleteAddress, type OwnAddress } from "~/model/connection.model";
 import type { Slot } from "~/model/signaling.model";
 import {
   DEFAULT_PRIVACY_LEVEL,
@@ -244,7 +244,7 @@ async function addressFields(
   ua: string,
   address: OwnAddress,
 ): Promise<Pick<PeerProfile, "ua" | "device" | "ip" | "protocol">> {
-  const hasAddress = address.ip !== undefined && address.protocol !== undefined;
+  const hasAddress = isCompleteAddress(address);
 
   if (profile.privacyLevel === "off") {
     const device = await describeDevice(ua);
