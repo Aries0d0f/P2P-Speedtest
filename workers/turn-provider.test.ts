@@ -23,7 +23,9 @@ describe("mintTurnCredentials", () => {
       expect(String(url)).toBe(
         "https://rtc.live.cloudflare.com/v1/turn/keys/key-id/credentials/generate",
       );
-      expect(init?.headers).toMatchObject({ Authorization: "Bearer key-secret" });
+      expect(new Headers(init?.headers).get("Authorization")).toBe(
+        "Bearer key-secret",
+      );
       expect(JSON.parse(init?.body as string)).toEqual({ ttl: 300 });
       return new Response(
         JSON.stringify({

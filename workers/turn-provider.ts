@@ -4,6 +4,7 @@
  * the DO never has to know how a TURN credential was obtained. Swapping
  * providers means rewriting this file, not its caller.
  */
+import http from "@aries0d0f/fetch-worker";
 
 const CREDENTIALS_ENDPOINT = (keyId: string) =>
   `https://rtc.live.cloudflare.com/v1/turn/keys/${keyId}/credentials/generate`;
@@ -42,33 +43,31 @@ export async function mintTurnCredentials(
   const keySecret = env.TURN_PROVIDER_APP_SECRET;
   if (!keyId || !keySecret) return null;
 
-  let response: Response;
-  try {
-    response = await fetch(CREDENTIALS_ENDPOINT(keyId), {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${keySecret}`,
-        "Content-Type": "application/json",
+  const { data, error } = await http
+    .post<CloudflareTurnCredentialsResponse, { ttl: number }>(
+      CREDENTIALS_ENDPOINT(keyId),
+      { ttl: ttlSeconds },
+      {
+        headers: {
+          Authorization: `Bearer ${keySecret}`,
+          "Content-Type": "application/json",
+        },
       },
-      body: JSON.stringify({ ttl: ttlSeconds }),
-    });
-  } catch {
-    return null;
-  }
-  if (!response.ok) return null;
+    )
+    .then((res) => res.json())
+    .then((res) => ({
+      urls: res?.iceServers?.urls?.filter(isBrowserUsable),
+      username: res?.iceServers?.username,
+      credential: res?.iceServers?.credential,
+    }))
+    .then((data) =>
+      data.urls && data.urls.length > 0
+        ? { data, error: null }
+        : { data: null, error: null },
+    )
+    .catch((err) => ({ data: null, error: err }));
 
-  let data: CloudflareTurnCredentialsResponse;
-  try {
-    data = await response.json();
-  } catch {
-    return null;
-  }
-  const urls = data.iceServers?.urls?.filter(isBrowserUsable);
-  if (!urls || urls.length === 0) return null;
+  if (error) return null;
 
-  return {
-    urls,
-    username: data.iceServers.username,
-    credential: data.iceServers.credential,
-  };
+  return data;
 }

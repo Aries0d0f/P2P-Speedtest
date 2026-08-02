@@ -1,5 +1,6 @@
 import { useState, type SubmitEvent } from "react";
 import { Link, useNavigate } from "react-router";
+import http from "@aries0d0f/fetch-worker";
 import { ProfileFields } from "~/components/ProfileFields";
 import { useProfileDraft } from "~/hooks/confirmed-profile.hook";
 import { resolveJoinInput, tokenToSlug } from "~/lib/room-token";
@@ -20,7 +21,11 @@ const USER_AGENT = typeof navigator !== "undefined" ? navigator.userAgent : "";
 
 export default function Home() {
   const navigate = useNavigate();
-  const { draft: profile, setDraft: setProfile, persist: confirmProfile } = useProfileDraft(USER_AGENT);
+  const {
+    draft: profile,
+    setDraft: setProfile,
+    persist: confirmProfile,
+  } = useProfileDraft(USER_AGENT);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [joinInput, setJoinInput] = useState("");
@@ -34,15 +39,26 @@ export default function Home() {
     setCreating(true);
     setCreateError(null);
     try {
-      const resp = await fetch("/api/rooms", { method: "POST" });
-      if (!resp.ok) {
-        throw new Error(
-          resp.status === 429
-            ? "Too many rooms created recently. Try again in a minute."
-            : `Could not create a room (${resp.status}).`,
-        );
+      const { slug, error } = await http
+        .post<{ slug: string }, undefined>("/api/rooms", void 0)
+        .then((res) => res.json())
+        .then((data) => ({ slug: data.slug, error: undefined }))
+        .catch((err) => {
+          if (err.status === 429) {
+            return {
+              slug: undefined,
+              error: "Too many rooms created recently. Try again in a minute.",
+            };
+          }
+          return {
+            slug: undefined,
+            error: `Could not create a room (${err.status}).`,
+          };
+        });
+        
+      if (error) {
+        throw new Error(error);
       }
-      const { slug } = (await resp.json()) as { slug: string };
       const confirmed = confirmProfile();
       navigate(`/room/${slug}`, { state: { profile: confirmed } });
     } catch (err) {

@@ -11,6 +11,8 @@
  * the exchange starts, instead of an `ip` that lands only sometimes.
  */
 
+import http from "@aries0d0f/fetch-worker";
+
 import { sanitizeGeo, type GeoInfo } from "~/model/geo.model";
 import type { OwnAddress } from "~/model/connection.model";
 import { isValidIp } from "~/model/peer.model";
@@ -51,18 +53,18 @@ function readAddress(data: unknown): OwnAddress {
 /** `null` means the request itself failed — distinct from a request that
  * answered with nothing usable, which is a legitimate (and cacheable) answer. */
 export async function fetchSelfLookup(): Promise<SelfLookup | null> {
-  try {
-    const resp = await fetch(GEO_ENDPOINT, {
+  return http
+    .get<SelfLookup>(GEO_ENDPOINT, {
       headers: {
-        'Accept': 'application/json'
-      }
-    });
-    if (!resp.ok) return null;
-    const data = await resp.json();
-    return { address: readAddress(data), geo: sanitizeGeo(unwrapGeoPayload(data)) };
-  } catch {
-    return null;
-  }
+        Accept: "application/json",
+      },
+    })
+    .then((res) => res.json())
+    .then((data) => ({
+      address: readAddress(data),
+      geo: sanitizeGeo(unwrapGeoPayload(data)),
+    }))
+    .catch(() => null);
 }
 
 let inFlight: Promise<SelfLookup> | null = null;
