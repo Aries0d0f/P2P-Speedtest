@@ -30,6 +30,7 @@
 		"uuid": "^14.0.1"
 	},
 	"devDependencies": {
+		"@aries0d0f/fetch-worker": "^0.1.0",
 		"@cloudflare/vite-plugin": "^1.48.0",
 		"@cloudflare/vitest-pool-workers": "^0.19.0",
 		"@react-router/dev": "^8",
