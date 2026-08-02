@@ -1,5 +1,8 @@
-import { act, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { IconType } from "react-icons";
+import { BsArrows, BsThreeDots } from "react-icons/bs";
+import { FaArrowLeftLong, FaArrowRightArrowLeft, FaArrowRightLong } from "react-icons/fa6";
 
 import type { StageProgress } from "~/model/measurement.model";
 import type { Slot } from "~/model/signaling.model";
@@ -62,6 +65,40 @@ async function renderDashboard(presentation: LiveTestPresentation) {
   return result;
 }
 
+/** The peer readout, which is the text equivalent of the globe's markers. */
+function peerRegion(): HTMLElement {
+  return screen.getByRole("region", { name: "Peers" });
+}
+
+/** The one line that holds a peer's name, address, place and glyphs. */
+function peerLine(name: string | RegExp): HTMLElement {
+  return within(peerRegion()).getByText(name).closest("aside")!;
+}
+
+/** The glyph between the two peer lines says which way the bytes are moving,
+ * and says it only in pixels — so the test identifies it the way the eye
+ * does, by shape. Rendering the icon in isolation keeps the expectation tied
+ * to the component the dashboard imports rather than to a copied path. */
+function shapeOf(Icon: IconType): string {
+  const { container, unmount } = render(<Icon />);
+  const shape = pathsOf(container.querySelector("svg")!);
+  unmount();
+  return shape;
+}
+
+function pathsOf(svg: SVGElement): string {
+  return Array.from(svg.querySelectorAll("path"))
+    .map((path) => path.getAttribute("d"))
+    .join("|");
+}
+
+/** The direction glyph is the row's own child; the peers' device glyphs are
+ * nested inside their `aside`s. */
+function directionShape(): string {
+  const row = peerRegion().querySelector("aside")!.parentElement!;
+  return pathsOf(row.querySelector(":scope > svg")!);
+}
+
 beforeEach(() => {
   vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(
     () => ({ width: 900, height: 600, top: 0, left: 0, right: 900, bottom: 600, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect,
@@ -73,11 +110,16 @@ describe("LiveTestDashboard — semantics without the canvas", () => {
     await renderDashboard(presentationFor());
     // Scoped to the semantic region: the globe's own overlay labels are
     // `aria-hidden` decoration and must not be what a reader relies on.
-    const region = screen.getByRole("region", { name: "Peers and locations" });
+    const region = peerRegion();
     expect(region.textContent).toContain("Ada (You)");
     expect(region.textContent).toContain("Tokyo, Japan");
     expect(region.textContent).toContain("Grace");
     expect(region.textContent).toContain("Berlin, Germany");
+  });
+
+  it("names the connection type once, above the pair", async () => {
+    await renderDashboard(presentationFor({ connectionType: "RELAY" }));
+    expect(within(peerRegion()).getByText("Relayed via TURN")).toBeInTheDocument();
   });
 
   it("names each peer's device from what that peer shared", async () => {
@@ -87,7 +129,7 @@ describe("LiveTestDashboard — semantics without the canvas", () => {
         otherProfile: { name: "Grace", geo: BERLIN, ua: WINDOWS_UA },
       }),
     );
-    const region = screen.getByRole("region", { name: "Peers and locations" });
+    const region = peerRegion();
     // Ada said "iPad" outright; Grace said nothing but a UA, which is enough
     // to read a Windows desktop off.
     expect(within(region).getByRole("img", { name: "Apple tablet" })).toBeInTheDocument();
@@ -98,8 +140,7 @@ describe("LiveTestDashboard — semantics without the canvas", () => {
     await renderDashboard(
       presentationFor({ otherProfile: { name: "Grace", geo: BERLIN, ua: UBUNTU_UA } }),
     );
-    const region = screen.getByRole("region", { name: "Peers and locations" });
-    expect(within(region).getByRole("img", { name: "Ubuntu computer" })).toBeInTheDocument();
+    expect(within(peerRegion()).getByRole("img", { name: "Ubuntu computer" })).toBeInTheDocument();
   });
 
   it("names no device for a peer that shared neither one nor a UA", async () => {
@@ -109,17 +150,26 @@ describe("LiveTestDashboard — semantics without the canvas", () => {
     // Privacy On withholds the UA, so there is nothing to announce — and in
     // particular not the reader's own device, which is what a UA parser
     // handed nothing would answer.
-    const region = screen.getByRole("region", { name: "Peers and locations" });
-    expect(within(region).queryAllByRole("img")).toHaveLength(0);
+    expect(within(peerRegion()).queryAllByRole("img")).toHaveLength(0);
+  });
+
+  it("shows each peer's address, and a dash where none was shared", async () => {
+    await renderDashboard(
+      presentationFor({
+        selfProfile: { name: "Ada", geo: TOKYO, ip: "203.0.113.7", protocol: "IPv4" },
+        otherProfile: { name: "Grace", geo: BERLIN },
+      }),
+    );
+    expect(peerLine(/^Ada/).textContent).toContain("203.0.113.7");
+    // A withheld address is an empty slot, never a plausible-looking guess.
+    expect(peerLine("Grace").textContent).toContain("-");
   });
 
   it("says exactly whose location is unavailable", async () => {
     await renderDashboard(presentationFor({ otherProfile: { name: "Grace" } }));
-    const region = screen.getByRole("region", { name: "Peers and locations" });
-    const graceLine = within(region).getByText("Grace").closest("p")!;
-    expect(graceLine.textContent).toContain("location not shared");
+    expect(peerLine("Grace").textContent).toContain("location not shared");
     // The peer who did share is unaffected.
-    expect(region.textContent).toContain("Tokyo, Japan");
+    expect(peerLine(/^Ada/).textContent).toContain("Tokyo, Japan");
   });
 
   it("distinguishes 'not shared' from 'not received yet'", async () => {
@@ -127,37 +177,113 @@ describe("LiveTestDashboard — semantics without the canvas", () => {
     expect(screen.getByText(/location not received yet/)).toBeInTheDocument();
   });
 
-  it("spells out the transfer direction as text", async () => {
-    await renderDashboard(
-      presentationFor({
-        stageId: DOWNLOAD,
-        stageProgress: { runId: RUN, entries: { [edgeKey(DOWNLOAD, 1)]: snapshot(DOWNLOAD, 1, 1_250_000) } },
-      }),
-    );
-    // Slot 0 sends during download: Ada → Grace, on both peers' screens.
-    expect(screen.getByText(/Ada → Grace/)).toBeInTheDocument();
-    expect(screen.getByText(/you send/)).toBeInTheDocument();
-  });
-
-  it("shows both duplex directions separately", async () => {
-    await renderDashboard(
-      presentationFor({
-        stageId: DUPLEX,
-        stageProgress: { runId: RUN, entries: {
-          [edgeKey(DUPLEX, 0)]: snapshot(DUPLEX, 0, 1_250_000),
-          [edgeKey(DUPLEX, 1)]: snapshot(DUPLEX, 1, 2_500_000),
-        } },
-      }),
-    );
-    expect(screen.getByText(/Grace → Ada/)).toBeInTheDocument();
-    expect(screen.getByText(/Ada → Grace/)).toBeInTheDocument();
-  });
-
   it("keeps the canvas decorative", async () => {
     await renderDashboard(presentationFor());
     const canvas = document.querySelector("canvas");
     expect(canvas).not.toBeNull();
     expect(canvas).toHaveAttribute("aria-hidden", "true");
+  });
+});
+
+describe("LiveTestDashboard — the pair's direction glyph", () => {
+  it("points along the stage that is running", async () => {
+    // Global stage direction, not this browser's role: `download` is always
+    // slot 0 -> slot 1, and the glyph is drawn from the stage name alone, so
+    // both peers see the same arrow.
+    for (const [stageId, Icon] of [
+      [DOWNLOAD, FaArrowLeftLong],
+      [UPLOAD, FaArrowRightLong],
+      [DUPLEX, FaArrowRightArrowLeft],
+    ] as const) {
+      const expected = shapeOf(Icon);
+      const { unmount } = await renderDashboard(presentationFor({ stageId }));
+      expect(directionShape()).toBe(expected);
+      unmount();
+    }
+  });
+
+  it("falls back to a plain two-way glyph when no stage is running", async () => {
+    const expected = shapeOf(BsArrows);
+    for (const phase of ["paired", "result"] as const) {
+      const { unmount } = await renderDashboard(presentationFor({ phase }));
+      expect(directionShape()).toBe(expected);
+      unmount();
+    }
+  });
+
+  it("draws the three arrows apart from one another", async () => {
+    // Colour and shape are the only distinction left once the direction is no
+    // longer spelled out, so the three must not collapse into one glyph.
+    const shapes = [FaArrowLeftLong, FaArrowRightLong, FaArrowRightArrowLeft, BsArrows].map(shapeOf);
+    expect(new Set(shapes).size).toBe(shapes.length);
+  });
+});
+
+describe("LiveTestDashboard — waiting for the other peer", () => {
+  it("holds the second line open until the peer is really there", async () => {
+    const expected = shapeOf(BsThreeDots);
+    for (const phase of ["waiting", "pairing", "finalizing"] as const) {
+      const { unmount } = await renderDashboard(presentationFor({ phase }));
+      const region = peerRegion();
+      expect(within(region).getByText("Waiting for peer...")).toBeInTheDocument();
+      // Nothing about the other peer is drawn from a profile this phase has
+      // not committed to yet.
+      expect(within(region).queryByText("Grace")).toBeNull();
+      expect(directionShape()).toBe(expected);
+      unmount();
+    }
+  });
+
+  it("still names this browser's own peer while it waits", async () => {
+    await renderDashboard(presentationFor({ phase: "waiting" }));
+    expect(peerLine(/^Ada/).textContent).toContain("Tokyo, Japan");
+  });
+});
+
+describe("LiveTestDashboard — the detail panel", () => {
+  const withDetails = () =>
+    presentationFor({
+      selfProfile: {
+        name: "Ada",
+        ua: MAC_UA,
+        geo: { ...TOKYO, isp: "Sakura Internet", org: "Sakura", proxy: true },
+      },
+      otherProfile: { name: "Grace", geo: BERLIN },
+    });
+
+  it("keeps ISP and user agent folded away until the pair is tapped", async () => {
+    await renderDashboard(withDetails());
+    expect(screen.queryByText("User Agent")).toBeNull();
+    expect(screen.queryByText(MAC_UA)).toBeNull();
+
+    const row = peerRegion().querySelector("aside")!.parentElement!;
+    fireEvent.click(row);
+
+    expect(screen.getAllByText("User Agent").length).toBeGreaterThan(0);
+    expect(screen.getByText(MAC_UA)).toBeInTheDocument();
+    expect(screen.getByText("Sakura Internet · Sakura")).toBeInTheDocument();
+    // Grace withheld both, so her column is a dash rather than Ada's values.
+    expect(screen.getAllByText("-").length).toBeGreaterThan(0);
+
+    fireEvent.click(row);
+    expect(screen.queryByText("User Agent")).toBeNull();
+  });
+
+  it("spells out the network annotations that the line only draws", async () => {
+    await renderDashboard(withDetails());
+    fireEvent.click(peerRegion().querySelector("aside")!.parentElement!);
+    // The shield glyph on the name line is unlabelled; this is where the word
+    // for it lives.
+    expect(screen.getAllByText("Proxy/VPN").length).toBeGreaterThan(0);
+    // Absent annotations are not listed at all, rather than listed as false.
+    expect(screen.queryByText("Cellular")).toBeNull();
+    expect(screen.queryByText("Hosting")).toBeNull();
+  });
+
+  it("opens the same detail from a tap on a single peer", async () => {
+    await renderDashboard(withDetails());
+    fireEvent.click(peerLine(/^Ada/));
+    expect(screen.getAllByText(MAC_UA).length).toBeGreaterThan(0);
   });
 });
 
@@ -193,7 +319,7 @@ describe("LiveTestDashboard — panels follow the presentation", () => {
     for (const phase of ["waiting", "pairing", "paired"] as const) {
       const { unmount } = await renderDashboard(presentationFor({ phase }));
       expect(document.querySelector("canvas")).not.toBeNull();
-      expect(screen.getByRole("region", { name: "Peers and locations" })).toBeInTheDocument();
+      expect(peerRegion()).toBeInTheDocument();
       // No readings yet, so an empty graph and a dead gauge would be furniture.
       expect(screen.queryByTestId("speed-graph")).toBeNull();
       expect(screen.queryByTestId("speed-gauge")).toBeNull();
@@ -240,7 +366,7 @@ describe("LiveTestDashboard — panels follow the presentation", () => {
     });
 
     expect(screen.getByTestId("speed-graph")).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Peers and locations" })).toBeInTheDocument();
+    expect(peerRegion()).toBeInTheDocument();
     // The run is over; a live gauge would claim a transfer that has stopped.
     expect(screen.queryByTestId("speed-gauge")).toBeNull();
   });
@@ -258,7 +384,7 @@ describe("LiveTestDashboard — panels follow the presentation", () => {
     await renderDashboard(presentation);
 
     expect(document.querySelector("canvas")).not.toBeNull();
-    const region = screen.getByRole("region", { name: "Peers and locations" });
+    const region = peerRegion();
     expect(region.textContent).toContain("Ada (You)");
     expect(region.textContent).toContain("Grace");
     expect(screen.queryByTestId("speed-graph")).toBeNull();
