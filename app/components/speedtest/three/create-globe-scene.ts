@@ -18,6 +18,7 @@
  */
 
 import * as THREE from "three";
+import http from "@aries0d0f/fetch-worker";
 
 import maskUrl from "~/assets/world-land-mask.png";
 import { IDENTITY_QUAT, MIN_CAMERA_DISTANCE, clamp, fibonacciSphere, geoPointToVector, planRoute, projectedNorthTiltDeg, recommendedCameraDistance, routePointAt, targetOrientation, vectorToUv, type RoutePlan } from "~/lib/globe-math";
@@ -77,8 +78,7 @@ function toThree(v: Vec3): THREE.Vector3 {
  * whole world stays one draw call.
  */
 async function loadLandMask(): Promise<{ width: number; height: number; data: Uint8Array }> {
-  const response = await fetch(maskUrl);
-  if (!response.ok) throw new Error(`land mask ${response.status}`);
+  const response = await http.get(maskUrl, { cache: "force-cache" }); // warm the service worker
   const bitmap = await createImageBitmap(await response.blob());
   try {
     const canvas = document.createElement("canvas");
