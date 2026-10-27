@@ -84,8 +84,23 @@ async function handleRoomUpgrade(
 
 const ROOM_UPGRADE_PATH = /^\/api\/room\/([^/]+)\/?$/;
 
+/**
+ * HTTP2Shell (CVE-2026-111497) is a Brotli decoder flaw. No route reads a
+ * request body today, but refuse Brotli-encoded requests up front so a
+ * future body-reading route can never hand attacker bytes to the decoder.
+ */
+function hasBrotliEncoding(request: Request): boolean {
+  const encoding = request.headers.get("Content-Encoding");
+  if (encoding === null) return false;
+  return encoding.split(",").some((token) => token.trim().toLowerCase() === "br");
+}
+
 export default {
   async fetch(request, env) {
+    if (hasBrotliEncoding(request)) {
+      return new Response("Unsupported Media Type", { status: 415 });
+    }
+
     const url = new URL(request.url);
 
     if (url.pathname === "/api/rooms" && request.method === "POST") {

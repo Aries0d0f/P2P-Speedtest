@@ -145,3 +145,22 @@ describe("other /api/* paths", () => {
     }
   });
 });
+
+describe("Brotli-encoded requests", () => {
+  it("returns 415 when Content-Encoding includes br, in any case or position", async () => {
+    for (const encoding of ["br", "BR", "gzip, br", " br "]) {
+      const resp = await SELF.fetch("http://example.com/api/rooms", {
+        method: "POST",
+        headers: { ...ip("203.0.113.50"), "Content-Encoding": encoding },
+      });
+      expect(resp.status).toBe(415);
+    }
+  });
+
+  it("does not match br as a substring of another encoding", async () => {
+    const resp = await SELF.fetch("http://example.com/api/whatever", {
+      headers: { ...ip("203.0.113.51"), "Content-Encoding": "x-brotli-ish" },
+    });
+    expect(resp.status).toBe(404);
+  });
+});
